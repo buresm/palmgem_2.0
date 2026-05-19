@@ -125,7 +125,7 @@ begin
     if tree_lad_exists then
 	    text1 = format('%I', tree_lad);
 	else
-        text1 = format('case when %I  = 1 :: varchar then ''1.6'' else ''1.0'' end', tree_coniferous);
+        text1 = format('case when %I :: varchar = 1 :: varchar then ''1.6'' else ''1.0'' end', tree_coniferous);
 	end if;
     -- formula for calculation of lad reduction - leaf and coniferous tree
     text2 = format('case when %I = ''0'' then %s else 1.0 end', tree_coniferous, lad_reduction);
