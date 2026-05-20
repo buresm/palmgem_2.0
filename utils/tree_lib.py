@@ -69,6 +69,24 @@ def process_trees(cfg, connection, cur):
     sql_debug(connection)
     restore_log_level(cfg)
 
+    if cfg.trees.constant_lad:
+        debug("Forcing constant tree LAD, BAD")
+        sqltext = 'select max(treeh) from "{0}"."{1}"'.format(cfg.domain.case_schema, cfg.tables.trees)
+        cur.execute(sqltext)
+        ret = cur.fetchone()
+        nzlad = ceil(ret[0] / cfg.domain.dz) + 1
+        for l in range(nzlad):
+            sqltext = f"""
+                update "{cfg.domain.case_schema}"."{cfg.tables.trees_grid}"
+                set lad_{l} = {cfg.trees.constant_lad_val},
+                    bad_{l} = {cfg.trees.bad_coef} * {cfg.trees.constant_lad_val}
+                where lad_{l} > 0; 
+            """
+            cur.execute(sqltext)
+            sql_debug(connection)
+
+
+
 def process_lai(cfg, connection, cur):
     """ A routine to process canopy using source LAI and canopy height into LAD """
     debug('Add lai and canopy height column into grid table')
