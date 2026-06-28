@@ -17,6 +17,7 @@ def _make_cfg(**flags):
             'roofs': 'roofs',
             'walls': 'walls',
             'grid': 'grid',
+            'trees': 'trees',
         },
         'type_range': {'building_min': 900, 'building_max': 999},
         'landcover': {'surface_fractions': False},
@@ -55,13 +56,26 @@ class FakeDB:
 def test_noop_when_all_flags_present():
     """Full single-process run: flags already set -> never touches the DB."""
     cfg = _make_cfg(has_buildings=True, has_3d_buildings=True,
-                    has_surface_params=True, lod2=True)
+                    has_surface_params=True, lod2=True, has_trees=True)
     db = FakeDB()
     ensure_capability_flags(cfg, db)
     assert db.queried is False
     # values are left exactly as initialize_domain set them
     assert cfg.has_buildings is True
     assert cfg.lod2 is True
+    assert cfg.has_trees is True
+
+
+def test_has_trees_derived_from_table():
+    """A trees table in the case schema -> has_trees; absent -> False."""
+    cfg = _make_cfg()
+    db = FakeDB(tables={'trees'})
+    ensure_capability_flags(cfg, db)
+    assert cfg.has_trees is True
+
+    cfg_none = _make_cfg()
+    ensure_capability_flags(cfg_none, FakeDB())
+    assert cfg_none.has_trees is False
 
 
 def test_buildings_from_landcover_rows():

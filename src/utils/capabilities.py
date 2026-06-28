@@ -29,7 +29,7 @@ def ensure_capability_flags(cfg, db):
     ``initialize_domain`` already set them, including config-driven adjustments such
     as ``force_lsm_only`` — is left exactly as-is.
     """
-    needed = ['has_buildings', 'has_3d_buildings', 'has_surface_params', 'lod2']
+    needed = ['has_buildings', 'has_3d_buildings', 'has_surface_params', 'lod2', 'has_trees']
     if all(key in cfg._settings for key in needed):
         return
 
@@ -66,11 +66,15 @@ def ensure_capability_flags(cfg, db):
     if cfg.landcover.surface_fractions and lod2:
         lod2 = False
 
+    # trees present: the trees vector was copied to the case schema
+    has_trees = _table_exists(db, schema, cfg.tables.trees)
+
     for key, value in {
         'has_buildings': has_buildings,
         'has_3d_buildings': has_3d_buildings,
         'has_surface_params': has_surface_params,
         'lod2': lod2,
+        'has_trees': has_trees,
     }.items():
         if key not in cfg._settings:
             cfg.update_setting(key, value)

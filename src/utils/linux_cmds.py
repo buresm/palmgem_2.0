@@ -28,7 +28,7 @@ class ShapefileImporter:
             f"port={db_config.get('port', 5432)}"
         )
 
-    def import_shp(self, file_path, schema_name, table_name, srid, ogr2ogr_exe='ogr2ogr', overwrite=True):
+    def import_shp(self, file_path, schema_name, table_name, srid, idx='gid', ogr2ogr_exe='ogr2ogr', overwrite=True):
         """Executes ogr2ogr command."""
         cmd = [
             str(Path(ogr2ogr_exe)), # Convert to clean plain string for Windows
@@ -40,6 +40,7 @@ class ShapefileImporter:
             "-t_srs", f"EPSG:{srid}",
             "-lco", "GEOMETRY_NAME=geom",
             "-lco", "PRECISION=NO"
+            "-lco", f"FID={idx}",
         ]
 
         if overwrite:

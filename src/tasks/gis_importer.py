@@ -39,6 +39,7 @@ class GisImporter(BaseTask):
                     table_name=table,
                     srid=srid,
                     ogr2ogr_exe=ogr2ogr_exe,
+                    idx=self.cfg.idx[table]
                 )
             except RuntimeError as e:
                 # ogr2ogr may exit non-zero on benign loader warnings (e.g.

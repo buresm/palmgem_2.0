@@ -1,10 +1,18 @@
 from math import ceil
 from .base import BaseTask
 from src.logger import debug, progress, verbose, warning, error, sql_debug, sql_verbose
+from src.utils.capabilities import ensure_capability_flags
 
 
 class LadGenerator(BaseTask):
     def run(self):
+        # has_trees is normally set by initialize_domain; re-derive it from the
+        # schema for staged runs. Skip cleanly when there is no trees table so a
+        # tree-free domain (or a misordered run) does not crash on max(treeh).
+        ensure_capability_flags(self.cfg, self.db)
+        if not self.cfg.has_trees:
+            warning('no trees table in case schema; skipping leaf area density (LAD) generation')
+            return
         self.process_trees()
 
     def process_trees(self):
@@ -79,7 +87,22 @@ class LadGenerator(BaseTask):
 
 class LaiGenerator(BaseTask):
     def run(self):
+        # skip cleanly when the LAI / canopy-height rasters are not present in the
+        # case schema, rather than crashing on the raster intersection.
+        if not self._lai_inputs_present():
+            warning('lai / canopy_height rasters not in case schema; skipping LAI generation')
+            return
         self.process_lai()
+
+    def _lai_inputs_present(self):
+        """True only if both rasters process_lai() reads exist in the case schema."""
+        sql = ("select exists(select 1 from information_schema.tables "
+               "where table_schema = %s and table_name = %s)")
+        schema = self.cfg.domain.case_schema
+        return all(
+            self.fetchone(sql, (schema, table))
+            for table in (self.cfg.tables.lai, self.cfg.tables.canopy_height)
+        )
 
     def process_lai(self):
         """
