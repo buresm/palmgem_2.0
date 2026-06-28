@@ -1,0 +1,407 @@
+# Urban Surface Model (USM) parameters — building and wall physics
+# Note: YAML anchors from default_lsm_config.yaml are not cross-file;
+# anchor values are inlined here as literals.
+# zwall_norm: [0.0242, 0.0969, 0.346, 1.0] | wintrans: 0.8
+# indoor_temp: 297 | outdoor_temp: 295 | ground_floor_height: 3
+
+# Surface physical parameters (LOD2). A material-properties lookup table keyed
+# by integer `code` (referenced from landcover `catland` and wall/roof category
+# columns). Shipped as a CSV so it stays compact and spreadsheet-editable; the
+# `initialize_domain` task reads it and builds the PostGIS `surface_params`
+# table in the case schema. LOD2 surface params are only applied when the input
+# landcover carries a `catland` column. Point this at your own CSV (absolute, or
+# relative to the config/ directory) to override the defaults. See docs/lod2.md.
+surface_params_file: 'surface_params.csv'
+
+walls:
+    # wall directions (North, East, South, West) direction = [1, 2, 3, 4]
+    wall_directions: [ [ 0,1 ],[ 1,0 ],[ 0,-1 ],[ -1,0 ] ]
+    # wall azimuth (North, East, South, West)
+    wall_azimuth: [ 0, 90, 180, 270 ]
+    # roof directions (Up, Down) direction = [0, 5]
+    roof_directions: [ 1, -1 ]
+    # roof zenith (Up, Down)
+    roof_zenith: [ 0, 180 ]
+
+# treat insulated walls
+insulation:
+    enabled: False
+    fields: ['zatepd', 'zateph']
+    building_pars: [6, 7, 9, 10, 26, 27, 29, 30]
+    pars_fields: [1, 1, 1, 1, 0, 0, 0, 0]
+    pars_items: [0, 0, 1, 1, 0, 0, 1, 1]
+    building_surface_pars: [5, 6, 8, 9]
+    surface_pars_items: [0, 0, 1, 1]
+    values: [39000, 0.035, 30]
+
+# pr ... roof, pg ... ground floor, pu ... upper, pd ... downward facing, b ... bridge
+building_pars:
+    0:  'w.wallfracu'
+    1:  'w.winfracu'
+    2:  '0'
+    3:  '0'
+    4:  '0'
+    5:  '0'
+    6:  'pu.capacity_surf'
+    7:  'pu.capacity_surf'
+    8:  'pu.capacity_volume'
+    9:  'pu.conductivity_surf'
+    10: 'pu.conductivity_surf'
+    11: 'pu.conductivity_volume'
+    12: 297
+    13: 295
+    14: 'pu.emissivity'
+    15: 'pu.emissivity'
+    16: 'pu.emissivity'
+    17: 0.8
+    18: 'pu.roughness'
+    19: 'pu.roughness_h'
+    20: 3
+    21: 'w.wallfracd'
+    22: 'w.winfracd'
+    23: '0'
+    24: '0'
+    25: '0'
+    26: 'pg.capacity_surf'
+    27: 'pg.capacity_surf'
+    28: 'pg.capacity_volume'
+    29: 'pg.conductivity_surf'
+    30: 'pg.conductivity_surf'
+    31: 'pg.conductivity_volume'
+    32: 'pg.emissivity'
+    33: 'pg.emissivity'
+    34: 'pg.emissivity'
+    35: 0.8
+    36: 'pg.roughness'
+    37: 'pg.roughness_h'
+    38: '0'
+    39: '0'
+    40: '0'
+    41: !join [ p.thicknes*, 0.0242 ]
+    42: !join [ p.thicknes*, 0.0969 ]
+    43: !join [ p.thicknes*, 0.346 ]
+    44: !join [ p.thicknes*, 1.0 ]
+    45: 'pu.capacity_surf'
+    46: 'pu.conductivity_surf'
+    62: !join [ p.thicknes*, 0.0242 ]
+    63: !join [ p.thicknes*, 0.0969 ]
+    64: !join [ p.thicknes*, 0.346 ]
+    65: !join [ p.thicknes*, 1.0 ]
+    66: '0'
+    83: 'pu.capacity_surf'
+    84: 'pu.capacity_surf'
+    85: 'pu.capacity_surf'
+    86: 'pu.conductivity_surf'
+    87: 'pu.conductivity_surf'
+    88: 'pu.conductivity_volume'
+    89: '1.0'
+    90: !join [r.thickness*0.01*, 0.0242]
+    91: !join [r.thickness*0.01*, 0.0969]
+    92: !join [r.thickness*0.01*, 0.346]
+    93: !join [r.thickness*0.01*, 1.0]
+    94: 'p.capacity_surf'
+    95: 'p.capacity_surf'
+    96: 'p.capacity_volume'
+    97: 'p.conductivity_surf'
+    98: 'p.conductivity_surf'
+    99: 'p.conductivity_volume'
+    100: 'r.emissivity'
+    101: '0'
+    102: '0'
+    105: '0.0'
+    136: 'pu.capacity_volume'
+    137: 'pu.conductivity_volume'
+    138: 'pg.capacity_volume'
+    139: 'pg.conductivity_volume'
+    146: 'p.capacity_surf'
+    147: 'p.conductivity_surf'
+
+building_albedo_type: #(building_surface_type,y,x)
+    0: '0'
+    1: '0'
+    2: '0'
+    3: '0'
+    4: '0'
+    5: '0'
+    6: '0'
+    7: '0'
+    8: '0'
+
+building_emissivity: #(building_surface_type,y,x)
+    0: 'pg.emissivity'
+    1: 'pu.emissivity'
+    2: 'r.emissivity'
+    3: 'pg.emissivity'
+    4: 'pu.emissivity'
+    5: 'r.emissivity'
+    6: 'pg.emissivity'
+    7: 'pu.emissivity'
+    8: 'r.emissivity'
+
+building_fraction: #(building_surface_type,y,x)
+    0: 'w.wallfracd'
+    1: 'w.wallfracu'
+    2: '1.0'
+    3: 'w.winfracd'
+    4: 'w.winfracu'
+    5: '0'
+    6: '0'
+    7: '0'
+    8: '0'
+
+building_general_pars: #(building_general_par,y,x)
+    0: 3  # ground floor level height
+
+building_heat_capacity: #(building_surface_type,building_surface_layer,y,x)
+    0: [pg.capacity_surf, pg.capacity_surf, pg.capacity_volume, pg.capacity_volume]
+    1: [pu.capacity_surf, pu.capacity_surf, pu.capacity_volume, pu.capacity_volume]
+    2: [pr.capacity_surf, pr.capacity_surf, pr.capacity_volume, pr.capacity_surf]
+
+building_heat_conductivity: # (building_surface_type,building_surface_layer,y,x)
+    0: [pg.conductivity_surf, pg.conductivity_surf, pg.conductivity_volume, pg.conductivity_volume]
+    1: [pu.conductivity_surf, pu.conductivity_surf, pu.conductivity_volume, pu.conductivity_volume]
+    2: [pr.conductivity_surf, pr.conductivity_surf, pr.conductivity_volume, pr.conductivity_surf]
+
+building_roughness_length: #(building_surface_level,y,x)
+    0: 'pg.roughness'
+    1: 'pu.roughness'
+    2: 'pr.roughness'
+
+building_roughness_length_qh: #(building_surface_level,y,x)
+    0: 'pg.roughness_h'
+    1: 'pu.roughness_h'
+    2: 'pr.roughness_h'
+
+building_thickness: #(building_surface_type,building_surface_layer,y,x)
+    0: [!join [ pr.thicknes*, 0.0242 ],
+        !join [ pr.thicknes*, 0.0969 ],
+        !join [ pr.thicknes*, 0.346 ],
+        !join [ pr.thicknes*, 1.0 ]]
+    1: [!join [ pr.thicknes*, 0.0242 ],
+        !join [ pr.thicknes*, 0.0969 ],
+        !join [ pr.thicknes*, 0.346 ],
+        !join [ pr.thicknes*, 1.0 ]]
+    2: [!join [r.thickness*0.01*, 0.0242],
+        !join [r.thickness*0.01*, 0.0969],
+        !join [r.thickness*0.01*, 0.346],
+        !join [r.thickness*0.01*, 1.0]]
+
+building_transmissivity: #(building_surface_level,y,x)
+    0: 0.8
+    1: 0.8
+    2: 0.8
+
+buildings_pars_depricated: False
+
+building_surface_pars:
+    0: ['1', 'w.wallfracd', 'w.wallfracu', '1', '1']
+    1: ['0', 'w.winfracd', 'w.winfracu', '0', '0']
+    2: '0'
+    3: '0'
+    4: '0'
+    5: ['pr.capacity_surf',        'pg.capacity_surf',       'pu.capacity_surf',       'pd.capacity_surf',       'b.capacity_surf']
+    6: ['pr.capacity_surf',        'pg.capacity_surf',       'pu.capacity_surf',       'pd.capacity_surf',       'b.capacity_surf']
+    7: ['pr.capacity_volume',      'pg.capacity_volume',     'pu.capacity_volume',     'pd.capacity_volume',     'b.capacity_volume']
+    8: ['pr.conductivity_surf',    'pg.conductivity_surf',   'pu.conductivity_surf',   'pd.conductivity_surf',   'b.conductivity_surf']
+    9: ['pr.conductivity_surf',    'pg.conductivity_surf',   'pu.conductivity_surf',   'pd.conductivity_surf',   'b.conductivity_surf']
+    10: ['pr.conductivity_volume', 'pg.conductivity_volume', 'pu.conductivity_volume', 'pd.conductivity_volume', 'b.conductivity_volume']
+    11: 297
+    12: 295
+    13: ['r.emissivity', 'pg.emissivity', 'pu.emissivity', 'pd.emissivity', 'b.emissivity']
+    14: ['r.emissivity', 'pg.emissivity', 'pu.emissivity', 'pd.emissivity', 'b.emissivity']
+    15: ['r.emissivity', 'pg.emissivity', 'pu.emissivity', 'pd.emissivity', 'b.emissivity']
+    16: 0.8
+    17: ['pr.roughness',   'pg.roughness',    'pu.roughness',     'pd.roughness',    'b.roughness']
+    18: ['pr.roughness_h', 'pg.roughness_h',  'pu.roughness_h',   'pd.roughness_h',  'b.roughness_h']
+    19: ['r.albedo',       'w.albedod',        'w.albedou',       'pd.emissivity',   'b.emissivity']
+    20: ['1-r.emissivity',  '1-pg.emissivity',  '1-pu.emissivity', '1-pd.emissivity', '1-b.emissivity']
+    21: ['r.albedo',       'w.albedod',        'w.albedou',       'pd.albedo',       'b.albedo']
+    22: ['r.albedo',       'w.albedod',        'w.albedou',       'pd.albedo',       'b.albedo']
+    23: ['1-r.emissivity',  '1-pg.emissivity',  '1-pu.emissivity', '1-pd.emissivity', '1-b.emissivity']
+    24: ['r.albedo',       'w.albedod',        'w.albedou',       'pd.albedo',       'b.albedo']
+    25: ['r.albedo',       'w.albedod',        'w.albedou',       'pd.albedo',       'b.albedo']
+    26: ['1-r.emissivity',  '1-pg.emissivity',  '1-pu.emissivity', '1-pd.emissivity', '1-b.emissivity']
+    27: ['r.albedo',       'w.albedod',        'w.albedou',       'pd.albedo',       'b.albedo']
+
+building_pars_repl:
+    99999: [ [ 99999, 0.5 ], [ 99999, 0.5 ] ]
+
+building_surface_pars_repl:
+    99999: [ [ 99999, 0.5 ], [ 99999, 0.5 ] ]
+
+building_type_albedos:
+    1:
+        wall:
+            broadband: 0.07
+            shortwave: 0.07
+            longwave: 0.07
+        roof:
+            broadband: 0.07
+            shortwave: 0.07
+            longwave: 0.07
+        win_wall:
+            broadband: 0.12
+            shortwave: 0.12
+            longwave: 0.12
+        win_roof:
+            broadband: 0.12
+            shortwave: 0.12
+            longwave: 0.12
+        green_wall:
+            broadband: 0.25
+            shortwave: 0.14
+            longwave: 0.34
+        green_roof:
+            broadband: 0.25
+            shortwave: 0.14
+            longwave: 0.34
+    2:
+        wall:
+            broadband: 0.07
+            shortwave: 0.07
+            longwave: 0.07
+        roof:
+            broadband: 0.07
+            shortwave: 0.07
+            longwave: 0.07
+        win_wall:
+            broadband: 0.12
+            shortwave: 0.12
+            longwave: 0.12
+        win_roof:
+            broadband: 0.12
+            shortwave: 0.12
+            longwave: 0.12
+        green_wall:
+            broadband: 0.25
+            shortwave: 0.14
+            longwave: 0.34
+        green_roof:
+            broadband: 0.25
+            shortwave: 0.14
+            longwave: 0.34
+    3:
+        wall:
+            broadband: 0.07
+            shortwave: 0.07
+            longwave: 0.07
+        roof:
+            broadband: 0.07
+            shortwave: 0.07
+            longwave: 0.07
+        win_wall:
+            broadband: 0.17
+            shortwave: 0.18
+            longwave: 0.18
+        win_roof:
+            broadband: 0.17
+            shortwave: 0.18
+            longwave: 0.18
+        green_wall:
+            broadband: 0.25
+            shortwave: 0.14
+            longwave: 0.34
+        green_roof:
+            broadband: 0.25
+            shortwave: 0.14
+            longwave: 0.34
+    4:
+        wall:
+            broadband: 0.07
+            shortwave: 0.07
+            longwave: 0.07
+        roof:
+            broadband: 0.07
+            shortwave: 0.07
+            longwave: 0.07
+        win_wall:
+            broadband: 0.12
+            shortwave: 0.12
+            longwave: 0.12
+        win_roof:
+            broadband: 0.12
+            shortwave: 0.12
+            longwave: 0.12
+        green_wall:
+            broadband: 0.25
+            shortwave: 0.14
+            longwave: 0.34
+        green_roof:
+            broadband: 0.25
+            shortwave: 0.14
+            longwave: 0.34
+    5:
+        wall:
+            broadband: 0.07
+            shortwave: 0.07
+            longwave: 0.07
+        roof:
+            broadband: 0.07
+            shortwave: 0.07
+            longwave: 0.07
+        win_wall:
+            broadband: 0.12
+            shortwave: 0.12
+            longwave: 0.12
+        win_roof:
+            broadband: 0.12
+            shortwave: 0.12
+            longwave: 0.12
+        green_wall:
+            broadband: 0.25
+            shortwave: 0.14
+            longwave: 0.34
+        green_roof:
+            broadband: 0.25
+            shortwave: 0.14
+            longwave: 0.34
+    6:
+        wall:
+            broadband: 0.07
+            shortwave: 0.07
+            longwave: 0.07
+        roof:
+            broadband: 0.07
+            shortwave: 0.07
+            longwave: 0.07
+        win_wall:
+            broadband: 0.17
+            shortwave: 0.18
+            longwave: 0.18
+        win_roof:
+            broadband: 0.17
+            shortwave: 0.18
+            longwave: 0.18
+        green_wall:
+            broadband: 0.25
+            shortwave: 0.14
+            longwave: 0.34
+        green_roof:
+            broadband: 0.25
+            shortwave: 0.14
+            longwave: 0.34
+    7:
+        wall:
+            broadband: 0.3
+            shortwave: 0.3
+            longwave: 0.3
+        roof:
+            broadband: 0.17
+            shortwave: 0.17
+            longwave: 0.17
+        win_wall:
+            broadband: 0.12
+            shortwave: 0.12
+            longwave: 0.12
+        win_roof:
+            broadband: 0.12
+            shortwave: 0.12
+            longwave: 0.12
+        green_wall:
+            broadband: 0.25
+            shortwave: 0.14
+            longwave: 0.34
+        green_roof:
+            broadband: 0.25
+            shortwave: 0.14
+            longwave: 0.34

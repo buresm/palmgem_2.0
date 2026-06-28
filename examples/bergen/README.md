@@ -1,11 +1,16 @@
-follow [preprocesor documentations](../../docs/run_prerocessor.md)
-1) from OpenStreetMap download Bergen. Use user [QGIS procedure](../../docs/user_preproces.md) to clip unnecessary polygons.
-2) from UrbanAtlas download Bergen. Use user [QGIS procedure](../../docs/user_preproces.md) to clip unnecessary polygons.
-3) from EU-DEM website download zip file. Use user [QGIS procedure](../../docs/user_preproces.md) to clip unnecessary raster tiles.
-4) from UrbanAtlas building height download Bergen. Use user [QGIS procedure](../../docs/user_preproces.md) to clip unnecessary raster tiles.
-5) Configure importing shell script: [import_pgsql_bergen.sh](import_pgsql_bergen.sh). Use correct path for shapefiles and raster files. 
-6) Configure user credential and password, database name and connection in [default_share.yaml](../../config/default_share.yaml) or directly in preprocessor config [bergen.yaml](bergen.yaml). Finish [bergen.yaml](bergen.yaml) configuration, change if necessary input domain extent. 
-7) Run preprocessing script: "python3 main_urban_atlas_preprocess.py -c examples/bergen/bergen.yaml". See log in log folder.
-8) Using QGIS check imported dataset, follow [visualization](../../docs/visuallization.md)
-9) Check [default configuration](../../config/default_config.yaml) and example [Bergen config](bergen_palm.yaml). Run "python3 main_palm_static.py -c examples/bergen/bergen_palm.yaml". See log in logs. 
-10) Using QGIS check created grid, follow [visualization](../../docs/visuallization.md). Check created png files in visual_check/bergen folder. See created static driver in output folder.
+# Bergen example
+
+Follow [preprocessor documentation](../../docs/run_preprocessor.md) for the full workflow.
+
+## Steps
+
+1. Download Bergen from **OpenStreetMap**. Use the [QGIS procedure](../../docs/user_preprocess.md) to clip to the area of interest.
+2. Download Bergen from **UrbanAtlas**. Use the [QGIS procedure](../../docs/user_preprocess.md) to clip unnecessary polygons.
+3. Download a **EU-DEM** tile covering Bergen. Use the [QGIS procedure](../../docs/user_preprocess.md) to clip the raster to the area of interest.
+4. Download the **UrbanAtlas building height** raster for Bergen. Clip as above.
+5. Configure the import script [import_pgsql_bergen.sh](import_pgsql_bergen.sh) with the correct paths to your downloaded files.
+6. Set database credentials in `.env` (copy from `.env.example`) or directly in [bergen.yaml](bergen.yaml). Review domain extent settings in [bergen.yaml](bergen.yaml).
+7. Run the GIS import: `python main.py -c examples/bergen/bergen.yaml` — check the log in `logs/`.
+8. Inspect the imported data in QGIS — see [visualization guide](../../docs/visualization.md).
+9. Review the static driver config [bergen_palm.yaml](bergen_palm.yaml) and run: `python main.py -c examples/bergen/bergen_palm.yaml`
+10. Check output in QGIS, `visual_check/bergen/`, and `output/`.

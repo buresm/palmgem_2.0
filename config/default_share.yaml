@@ -16,25 +16,29 @@
 # PALM-GeM. If not, see <https://www.gnu.org/licenses/>.
 
 # postgresql/postgis server
-pg_host: 'localhost'
-pg_port: 5432
-pg_user: 'unknown'
-pg_password: 'unknown'
-database: 'palm_static'
+database:
+  host: 'localhost'
+  port: 5432
+  user: 'unknown'
+  password: 'unknown'
+  database: 'palm_static'
+
 pg_owner: 'palm'
 
+# log level on the numeric scale: 5=EXTRA_VERBOSE, 10=DEBUG, 15=VERBOSE,
+# 25=PROGRESS, 30=WARNING, 40=ERROR. Per-area level_* default to -1 (inherit).
 logs:
-    level: 4
+    level: 25
     level_buildings: -1
     level_check_consistency: -1
     level_landcover: -1
     level_trees: -1
     level_build_walls: -1
-    
+
 visual_check:
-    enabled: True
+    enabled: False
     show_plots: False
-    
+
 # reference coordinate system of inputs (in case the vector or raster shape does not contain srid)
 srid: 32633
 dem_srid: 3035

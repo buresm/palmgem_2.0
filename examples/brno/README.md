@@ -1,11 +1,16 @@
-follow [preprocesor documentations](../../docs/run_prerocessor.md)
-1) from OpenStreetMap download Brno. Use user [QGIS procedure](../../docs/user_preproces.md) to clip unnecessary polygons.
-2) from UrbanAtlas download Brno. Use user [QGIS procedure](../../docs/user_preproces.md) to clip unnecessary polygons.
-3) from EU-DEM website download zip file. Use user [QGIS procedure](../../docs/user_preproces.md) to clip unnecessary raster tiles.
-4) from UrbanAtlas building height download Brno. Use user [QGIS procedure](../../docs/user_preproces.md) to clip unnecessary raster tiles.
-5) Configure importing shell script: [import_pgsql_berlin.sh](import_pgsql_berlin.sh). Use correct path for shapefiles and raster files. 
-6) Configure user credential and password, database name and connection in [default_share.yaml](../../config/default_share.yaml) or directly in preprocessor config [brno.yaml](brno.yaml). Finish [brno.yaml](brno.yaml) configuration, change if necessary input domain extent. 
-7) Run preprocessing script: "python3 main_urban_atlas_preprocess.py -c examples/brno/brno.yaml". See log in log folder.
-8) Using QGIS check imported dataset, follow [visualization](../../docs/visuallization.md)
-9) Check [default configuration](../../config/default_config.yaml) and example [Brno config](berlin_palm.yaml). Run "python3 main_palm_static.py -c examples/brno/berlin_palm.yaml". See log in logs. 
-10) Using QGIS check created grid, follow [visualization](../../docs/visuallization.md). Check created png files in visual_check/brno folder. See created static driver in output folder.
+# Brno example
+
+Follow [preprocessor documentation](../../docs/run_preprocessor.md) for the full workflow.
+
+## Steps
+
+1. Download Brno from **OpenStreetMap**. Use the [QGIS procedure](../../docs/user_preprocess.md) to clip to the area of interest.
+2. Download Brno from **UrbanAtlas**. Use the [QGIS procedure](../../docs/user_preprocess.md) to clip unnecessary polygons.
+3. Download a **EU-DEM** tile covering Brno. Use the [QGIS procedure](../../docs/user_preprocess.md) to clip the raster to the area of interest.
+4. Download the **UrbanAtlas building height** raster for Brno. Clip as above.
+5. Configure the import script [import_pgsql_brno.sh](import_pgsql_brno.sh) with the correct paths to your downloaded files.
+6. Set database credentials in `.env` (copy from `.env.example`) or directly in [brno.yaml](brno.yaml). Review domain extent settings in [brno.yaml](brno.yaml).
+7. Run the GIS import: `python main.py -c examples/brno/brno.yaml` — check the log in `logs/`.
+8. Inspect the imported data in QGIS — see [visualization guide](../../docs/visualization.md).
+9. Review the static driver config [brno_palm.yaml](brno_palm.yaml) and run: `python main.py -c examples/brno/brno_palm.yaml`
+10. Check output in QGIS, `visual_check/brno/`, and `output/`.

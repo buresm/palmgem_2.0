@@ -1,0 +1,256 @@
+# Land Surface Model (LSM) parameters
+
+# definition of the landcover type ranges
+type_range:
+    vegetation_min: 100
+    vegetation_max: 199
+    pavement_min:   200
+    pavement_max:   299
+    water_min:      300
+    water_max:      399
+    building_min:   900
+    building_max:   999
+    bridge:         907
+
+# definition of the surface properties ranges
+surf_range:
+    land_min: 0
+    land_max: 100
+    wall_min: 100
+    wall_max: 200
+    roof_min: 200
+    roof_max: 300
+
+landcover:
+    surface_fractions: False
+    min_fraction: 0.05
+
+ground:
+    nzsoil: 8              # number of layers of soil (pavements,...)
+    nzsoil_surface: 2      # number of layers of soil (pavements,...) considered as surface layers
+    soil_type_default: 3   # default soil type medium-fine in terms of porosity
+    dz_soil: [0.01, 0.02, 0.04, 0.06, 0.14, 0.26, 0.54, 1.86] # default soil layer thickness configuration from PALM
+    nzwall: 4              # number of wall layers (fixed to 4 for in PIDS so far)
+    zwall_norm:
+        - &zwall_norm1 0.0242
+        - &zwall_norm2 0.0969
+        - &zwall_norm3 0.346
+        - &zwall_norm4 1.0 # normalized wall layers position
+    zwindow_norm: [ 0.25, 0.5, 0.75, 1.0 ]
+    zgreen_norm: [ 0.25, 0.5, 0.75, 1.0 ]
+    ground_floor_height: &ground_floor_height 3  # height of the pedestrian zone (m)
+
+# minimal thickness of roofs and walls
+minroofthick: &minroofthick 0.3
+minwallthick: &minwallthick 0.3
+# window transmission (common for all windows for now)
+wintrans: &wintrans 0.8
+
+# temperatures for indoor/outdoor buildings
+temperatures_indoor:
+    indoor:  &indoor_temp 297   # indoor
+    outdoor: &outdoor_temp 295  # outdoor
+
+water_pars_temp:       # assign water body temperature according to landcover type
+    1: 283.15
+    2: 283.15
+    3: 283.15
+    4: 283.15
+    5: 283.15
+    6: 283.15
+
+water_pars:
+    5: 0 # albedo_type
+    6: p.emissivity # Surface emissivity
+
+pavement_pars:
+    0: p.roughness     # roughness length for momentum (m)
+    1: p.roughness_h   # roughness length for heat (m)
+    2: 0               # albedo type
+    3: p.emissivity    # emissivity (0-1)
+
+vegetation_pars:
+    4: p.roughness # Roughness length for momentum
+    5: p.roughness_h # Roughness length for heat
+    10: 0 # albedo_type
+    11: p.emissivity # Surface emissivity
+
+pavement_subsurface_pars:
+    0: ['p.conductivity_surf','p.conductivity_volume']      # Thermal conductivity
+    1: ['p.capacity_surf','p.capacity_volume']              # Volumetric heat capacity
+
+# calculation formulas for albedo_pars(nalbedo_pars,y,x)
+# [landcover, building roof, building wall (above ground floor level)]
+albedo_pars:
+    0: ['l.albedo',      'r.albedo',      'w.albedou']
+    1: ['1-l.emissivity', '1-r.emissivity', '1-pw.emissivity']
+    2: ['l.albedo',      'r.albedo',      'w.albedou']
+    3: ['1-l.emissivity', '1-r.emissivity', '1-pw.emissivity']
+    4: ['l.albedo',      'r.albedo',      'w.albedou']
+    5: ['1-l.emissivity', '1-r.emissivity', '1-pw.emissivity']
+    6: ['l.albedo',      'r.albedo',      'w.albedou']
+
+soil_moisture_adjust:
+    35: 1.0
+    36: 1.0
+
+# albedo parameters from PALM vegetation/pavement/water types
+prepare_albedo_type: False
+
+vegetation_type_albedos:
+    1:
+        broadband: 0.08
+        shortwave: 0.08
+        longwave: 0.08
+    2:
+        broadband: 0.19
+        shortwave: 0.09
+        longwave: 0.28
+    3:
+        broadband: 0.25
+        shortwave: 0.14
+        longwave: 0.34
+    4:
+        broadband: 0.14
+        shortwave: 0.06
+        longwave: 0.22
+    5:
+        broadband: 0.19
+        shortwave: 0.06
+        longwave: 0.31
+    6:
+        broadband: 0.14
+        shortwave: 0.06
+        longwave: 0.22
+    7:
+        broadband: 0.17
+        shortwave: 0.06
+        longwave: 0.27
+    8:
+        broadband: 0.18
+        shortwave: 0.06
+        longwave: 0.28
+    9:
+        broadband: 0.43
+        shortwave: 0.35
+        longwave: 0.51
+    10:
+        broadband: 0.19
+        shortwave: 0.1
+        longwave: 0.27
+    11:
+        broadband: 0.19
+        shortwave: 0.09
+        longwave: 0.28
+    12:
+        broadband: 0.43
+        shortwave: 0.35
+        longwave: 0.51
+    13:
+        broadband: 0.77
+        shortwave: 0.9
+        longwave: 0.65
+    14:
+        broadband: 0.23
+        shortwave: 0.11
+        longwave: 0.33
+    15:
+        broadband: 0.23
+        shortwave: 0.11
+        longwave: 0.33
+    16:
+        broadband: 0.25
+        shortwave: 0.14
+        longwave: 0.34
+    17:
+        broadband: 0.18
+        shortwave: 0.06
+        longwave: 0.28
+    18:
+        broadband: 0.17
+        shortwave: 0.06
+        longwave: 0.27
+
+pavement_type_albedos:
+    1:
+        broadband: 0.17
+        shortwave: 0.17
+        longwave: 0.17
+    2:
+        broadband: 0.17
+        shortwave: 0.17
+        longwave: 0.17
+    3:
+        broadband: 0.3
+        shortwave: 0.3
+        longwave: 0.3
+    4:
+        broadband: 0.17
+        shortwave: 0.17
+        longwave: 0.17
+    5:
+        broadband: 0.17
+        shortwave: 0.17
+        longwave: 0.17
+    6:
+        broadband: 0.17
+        shortwave: 0.17
+        longwave: 0.17
+    7:
+        broadband: 0.17
+        shortwave: 0.17
+        longwave: 0.17
+    8:
+        broadband: 0.17
+        shortwave: 0.17
+        longwave: 0.17
+    9:
+        broadband: 0.17
+        shortwave: 0.17
+        longwave: 0.17
+    10:
+        broadband: 0.17
+        shortwave: 0.17
+        longwave: 0.17
+    11:
+        broadband: 0.17
+        shortwave: 0.17
+        longwave: 0.17
+    12:
+        broadband: 0.17
+        shortwave: 0.17
+        longwave: 0.17
+    13:
+        broadband: 0.17
+        shortwave: 0.17
+        longwave: 0.17
+    14:
+        broadband: 0.17
+        shortwave: 0.17
+        longwave: 0.17
+    15:
+        broadband: 0.17
+        shortwave: 0.17
+        longwave: 0.17
+
+water_type_albedos:
+    1:
+        broadband: 0.06
+        shortwave: 0.06
+        longwave: 0.06
+    2:
+        broadband: 0.06
+        shortwave: 0.06
+        longwave: 0.06
+    3:
+        broadband: 0.06
+        shortwave: 0.06
+        longwave: 0.06
+    4:
+        broadband: 0.06
+        shortwave: 0.06
+        longwave: 0.06
+    5:
+        broadband: 0.06
+        shortwave: 0.06
+        longwave: 0.06

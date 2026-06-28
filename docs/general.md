@@ -1,30 +1,56 @@
-# Logging system
-PALM-GEM provides standard logging tool. There are 6 different log levels separately for python and SQL outputs. 
-* 1 - EXTRA VERBOSE - prints some sql queries and detailed outputs. For development purposes.
-* 2 - VERBOSE - Detailed log, log inside loops, etc.
-* 3 - DEBUG - Print lower detailed logs.
-* 4 - PROGRESS - Print which part of process is currently being processed.
-* 5 - WARNING - Print Warning, if something non critical is not missing.
-* 6 - ERROR - Print Error and broke the run.
+# General
 
-All standard and error outputs are redirected into log file in log folder. The name of log file is **name**+**scenario**.**log**
+## Architecture
 
-# Configuration of PostgreSQL and PostGIS, loading special SQL function
-Before the first run of python scripts, you have to configure the PostgreSQL and PostGIS server and  upload PALM-GEM SQL functions into your PostgreSQL database. The procedure is described in [instalation guide](install.md).
+PALM-GeM runs a configurable sequence of tasks. Each task extends `BaseTask` and operates on the same PostGIS database connection. Tasks are registered in `TaskFactory` and executed in order by `main.py`.
 
-# Creation of final landcover - separation into smaller segments
-Due to optimization of spatial operation, we developed a segmentation of larger polygons into smaller using fishnet. Configuration of fishned size can be found in [general configuration](configuration_docs.md).
+`setup` and `finalize` always run implicitly (first and last). Only the tasks listed in `run_tasks` in your user config run in between.
 
-# Types
-To standard PALM surface types, we use integer value to identify PALM type. For particular surface categories the following ranges of values are used: vegetation_type type=(100, 199), pavement_type=(200, 299), water_type=(300, 399), building_type=(900,999).   
+See [CLAUDE.md](../CLAUDE.md) or the source in `src/tasks/` for the full task list.
 
-# mt table
-UA = UrbanAtlas \
-OSM = OpenStreetMap
+---
 
-| **UrbanAtlas type** | **PALM type, if not OSM** | **PALM type, if OSM** |
-|:------------------|:---------------|:---------------|
-| 11100 | 203 | 901 | 
+## Logging
+
+Six log levels control how much output is printed to the terminal and written to `logs/<name><scenario>.log`.
+
+Configure with `logs.level` in your YAML (use the numeric value):
+
+| Level | Numeric value | When to use |
+|:------|:-------------:|:------------|
+| EXTRA_VERBOSE | 5 | Every SQL query; heavy loop output. Development only. |
+| DEBUG | 10 | Detailed step-by-step progress inside functions. |
+| VERBOSE | 15 | Notable sub-steps, useful for tracing slow runs. |
+| PROGRESS | 25 | High-level task progress. **Default for production runs.** |
+| WARNING | 30 | Non-fatal issues (missing optional data, fallback used). |
+| ERROR | 40 | Fatal errors that abort the run. |
+
+A lower number means more output. Set `logs.level: 25` for normal runs; set `logs.level: 10` or `logs.level: 5` when debugging.
+
+---
+
+## Surface types
+
+PALM-GeM uses integer codes to identify PALM surface types. The ranges are:
+
+| Category | Range |
+|:---------|:------|
+| vegetation_type | 100 – 199 |
+| pavement_type | 200 – 299 |
+| water_type | 300 – 399 |
+| building_type | 900 – 999 |
+
+---
+
+## UrbanAtlas → PALM type mapping
+
+The table below shows the default mapping from UrbanAtlas codes to PALM types. The mapping can be overridden in your user config via the `mt` dictionary.
+
+UA = UrbanAtlas / OSM = OpenStreetMap
+
+| **UrbanAtlas type** | **PALM type (no OSM)** | **PALM type (with OSM)** |
+|:------------------|:----------------|:----------------|
+| 11100 | 203 | 901 |
 | 11210 | 203 | 902 |
 | 11220 | 203 | 903 |
 | 11230 | 203 | 902 |
@@ -51,5 +77,3 @@ OSM = OpenStreetMap
 | 33000 | 112 | 906 |
 | 40000 | 110 | 906 |
 | 50000 | 301 | 906 |
-
-# TODO work in progress

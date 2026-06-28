@@ -1,7 +1,7 @@
 # LOD2 description
 More advanced parametrization is available using lod2 switch. It has several mandatory extensions in inputs data. Items bellow show all mandatory items. Furthermore, we include description for all items. Moreover, there is a small example of input data from Prague simulation domain, a brief [description](../examples/prague_lod2/prague_lod2.md). 
 ### Surface parameters
-Table containing physical parameters of user defined surfaces. In folder examples/dejvice/files, we introduce our surface_params table in .csv format that is using import.sh script imported into PostgreSQL table. Attributes with brief description is: 
+Table containing physical parameters of user defined surfaces. These ship with PALM-GeM as a material-properties lookup CSV at `config/surface_params.csv` (keyed by integer `code`), and the `initialize_domain` task builds the PostGIS `surface_params` table from it automatically — no separate import step is needed. Point the `surface_params_file` config key at your own CSV (absolute, or relative to `config/`) to override the defaults. The table is only built, and LOD2 surface params only applied, when the input landcover carries a `catland` column referencing these codes. Attributes with brief description is: 
 * code: unique index
 * albedo: surface albedo
 * emissivity: emissivity of surface layer
@@ -38,7 +38,7 @@ A shape file which defines footprint of buildings roofs with their parameterizat
 * geom: gis geometry column
 
 ### landcover
-In case of lod2, landcover is extended with katland index (refers to surface_params code). See example in examples/dejvice/files/landcover.shp
+In case of lod2, landcover is extended with katland index (refers to surface_params code). See [examples/prague_lod2](../examples/prague_lod2/prague_lod2.md) for a working example.
 
 ## Workflow
 During the whole workflow, the existence of walls, roofs, landcover (katland index) and surface_params is checked. Furthermore, input data are clipped to domain extend (same as in case of lod1). In case of landcover, only standard spatial join between landcover and grid is performed. In case of roofs, spatial join with buldings_grid table is performed. In case of vertical roofs, building_walls table is created. Based on building height in buildings_grid, vertical walls are created with bottom height (0 in case of 2d building, nz_min in case of 3d) and top height. Also, roof vertical walls are created and marked as roof walls (for further parametrization as roof surfaces). Based on the fact, that only orthogonal surfaces are possible (lod2 is not compatible with cut cell topography), each surface has exactly defined position and orientation (westward, eastward, northward, southward facing). In next steps, horizontal surfaces are created and marked as roof surface with upward orientation. In case of 3D building, also downward faces are generated (with extra vertical walls inside passages, hallways etc.). These surfaces are then spatially joined with appropriate tables, vertical walls with walls table and roof walls with roofs table (buildings 3D join is with extra_shp table). Bridges (type 907 in landcover notation, 7 in PALM notation) are generated with respect to terrain following procedures (more info in PALM docs). \

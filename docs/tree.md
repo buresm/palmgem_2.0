@@ -1,7 +1,7 @@
 # Processing of trees in PALM-GEM
 A brief overview how tree are processed in PALM-GeM into PALM *static driver*. 
 ## Input data structure
-Following table show requirements for input GIS shape file with trees. 
+Following table show requirements for input GIS shape file with trees. The "Standard" column is the name PALM-GeM uses internally; the "Legacy example" shows a historical Czech name. If your source data uses a different column name, map it via `attribute_mapping.trees.<standard>: <your column>` in your config (e.g. `attribute_mapping.trees.treeh: vysstr`) — one name per column — and it is renamed during import. See [Attribute mapping](configuration_docs.md#attribute-mapping).
 | Attribute | Type  | Values | Desription |
 |:----------|:------|:-------|:----------------------|
 | gid       | int   | >1     | unique identified for each tree |

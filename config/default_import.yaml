@@ -1,42 +1,7 @@
-# Copyright 2018-2024 Institute of Computer Science of the Czech Academy of
-# Sciences, Prague, Czech Republic. Authors: Martin Bures, Jaroslav Resler.
-#
-# This file is part of PALM-GeM.
-#
-# PALM-GeM is free software: you can redistribute it and/or modify it under the
-# terms of the GNU General Public License as published by the Free Software
-# Foundation, either version 3 of the License, or (at your option) any later
-# version.
-#
-# PALM-GeM is distributed in the hope that it will be useful, but WITHOUT ANY
-# WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR
-# A PARTICULAR PURPOSE. See the GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License along with
-# PALM-GeM. If not, see <https://www.gnu.org/licenses/>.
+# Default configuration for data import step (gis_import task).
+# Override in your user config under data_imports.
+# See default_gis_importer.yaml for GIS-specific import settings.
 
-# name of input schema created during import
-input_schema: 'inputs_schema_name'
-
-# A switch to create schema from scratch, drop previous schema and create new
-scratch_import: True
-
-# Path to installation with postgresql
-bin_path: "path_to_postgresql_installation_bin_folder"
-
-# Name of input files, if not exists skipped automatically
-upload_files:
-    urban_atlas: ''
-    street_maps: ''
-    landcover: ''
-    roofs: ''
-    walls: ''
-    trees: ''
-    extras_shp: ''
-    imported_dem: ''
-    imported_buildings: ''
-    dem: ''
-    buildings: ''
-    extras: ''
-
-# TODO: create list with necessary attributes in shapefiles
+data_imports:
+    vectors: {}
+    rasters: {}

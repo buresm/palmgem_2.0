@@ -1,0 +1,38 @@
+# PALM-GeM PostgreSQL/PostGIS database container.
+#
+# This runs ONLY the database. The PALM-GeM Python tool and the GIS import
+# utilities (ogr2ogr / raster2pgsql / psql) still run on the host and connect
+# to this container over localhost — no code or import-path changes needed.
+#
+# Quick start:
+#   cp .env.example .env        # set PALM_GEM_DB_* credentials
+#   docker compose up -d        # start PostGIS on localhost:5432
+#
+# Extensions and the custom SQL functions in src/sql_function/ are loaded
+# automatically the first time the container initialises an empty data volume.
+
+services:
+  postgis:
+    image: postgis/postgis:16-3.4
+    container_name: palm_gem_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${PALM_GEM_DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${PALM_GEM_DB_PASSWORD:-postgres}
+      POSTGRES_DB: ${PALM_GEM_DB_NAME:-palm_static}
+    ports:
+      - "${PALM_GEM_DB_PORT:-5432}:5432"
+    volumes:
+      - palm_gem_pgdata:/var/lib/postgresql/data
+      # First-init bootstrap: extensions then custom SQL functions.
+      - ./docker/initdb:/docker-entrypoint-initdb.d:ro
+      # Mounted so 20-load-functions.sh can load them on first init.
+      - ./src/sql_function:/sql_function:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PALM_GEM_DB_USER:-postgres} -d ${PALM_GEM_DB_NAME:-palm_static}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  palm_gem_pgdata:

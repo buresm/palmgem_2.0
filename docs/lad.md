@@ -1,12 +1,26 @@
 # Leaf Area Density (LAD)
-Utilization of open source dataset with Leaf Area Index (LAI) and Tree Canopy Height into PALM gridded LAD. 
-## LAI
-LAI is obtained from source **Add missing source** in raster format. Input is uploaded via import shell script into input schema. 
 
-## Canopy Height
-Raster data with canopy height can be downloaded from **Add missing source**. Input is uploaded via import shell script into input postgresql schema. 
+PALM-GeM supports two approaches for deriving leaf area density (LAD), selected via `canopy.using_lai`:
 
-## Processing
-Due to spatial resolution 10m, we decided to use the simplest solution based on homogenous LAD distribution. The LAD is calculated as \
-LAD(z,y,x) = LAI(y,x) / Canopy_height(y,x) * max(min((grid_bottom_height(z,y,x) - Canopy_height) / dz), 1, 0) \
-More advanced approach based on Markkanen et al. (2003) will be added in future releases.
+- **Individual tree LAD** (default, `canopy.using_lai: False`) — gridding of point tree data via the `lad` task (`LadGenerator`). See [tree processing](tree.md) for details.
+- **Raster LAI / canopy height** (`canopy.using_lai: True`) — the `lai` task (`LaiGenerator`) intersects the PALM grid with raster LAI and canopy height layers.
+
+## Raster LAI approach
+
+### LAI raster
+Any gridded LAI raster covering the domain can be used (e.g. Copernicus Global Land Service LAI products). Import it as a raster table via the `gis_import` task and reference it as `tables.lai` in your config.
+
+### Canopy height raster
+Any gridded canopy height raster covering the domain can be used. Import it as a raster table via `gis_import` and reference it as `tables.canopy_height`. Values below 5.0 m are treated as noise/low vegetation and ignored.
+
+### Processing
+For each PALM grid cell, the `lai` task (`LaiGenerator`) intersects the grid point with the raster tiles and stores:
+
+- `lai = LAI_raster_value * canopy.lai_mod`
+- `canopy_height = LAI_canopy_raster_value * canopy.canopy_height_mod` (if ≥ 5.0 m, else 0)
+
+The `*_mod` multipliers allow scenario generation (e.g. seasonal LAI reduction) without re-importing rasters.
+
+## Individual tree LAD approach
+
+See [tree.md](tree.md) for the point-tree gridding algorithm (`palm_tree_grid` SQL function), which produces per-layer `lad_<k>` / `bad_<k>` columns directly rather than a single LAI value.

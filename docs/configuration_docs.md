@@ -1,15 +1,19 @@
-#Configuration 
-## Shared configuration
-| Configuration Item | Default value | Describtion |
-|:------------------|:---------------|:---------------|
-| **pg_host** |  localhost | name of database host |
-| **pg_port** |  5432 | port number |
-| **pg_user** |  unknown | name user in postgresql database |
-| **pg_password** |  unknown | password for pg_user in postgresql database |
-| **database** |  palm_static | name of database schema |
-| **pg_owner** |  palm | name of general group in postgresql database |
+# Configuration
 
-| **log.level** | 1 | Level of logging. See [docs](general.md) |
+## Shared configuration
+
+| Configuration Item | Default value | Description |
+|:------------------|:---------------|:---------------|
+| **database.host** | localhost | PostgreSQL host name or IP |
+| **database.port** | 5432 | PostgreSQL port number |
+| **database.user** | unknown | PostgreSQL user name |
+| **database.password** | unknown | PostgreSQL password |
+| **database.database** | palm_static | PostgreSQL database name |
+| **pg_owner** | palm | PostgreSQL owner/group role |
+| **run_tasks** | [setup] | Ordered list of task keys to execute. Available: `setup`, `gis_import`, `initialize_domain`, `urban_atlas_osm`, `urban_atlas_dem_buildings`, `lad`, `lai`, `static_driver`, `slurb_driver`, `cct_driver`, `prepare_slurb`, `finalize` |
+| **logs.level** | 25 | Logging verbosity level. See [logging docs](general.md). Values: 5=EXTRA_VERBOSE, 10=DEBUG, 15=VERBOSE, 25=PROGRESS, 30=WARNING, 40=ERROR |
+| **visual_check.enabled** | False | Generate PNG visual check images after static driver creation |
+| **visual_check.show_plots** | False | Show plots interactively during generation |
 
 | **srid** | 32633 | SRID reference system for final schema |
 | **srid_input** | 32633 | SRID reference system for final schema |
@@ -450,23 +454,70 @@
 | **building_surface_pars_repl.#**        | [ [ 99999, 0.5 ], [ 99999, 0.5 ] ]                                                                                      | List of specific replacement in building surface pars, more info in docs                                                                                             |
 | ****                                    |                                                                                                                         |                                                                                                                                                                      |
 
-### TODO: include into table
-columns:
-    catland: ['katland']
-    ...    A list of all potential names from given variable, it standardize naming in postgres columns
+| **attribute_mapping.\<table\>.\<standard\>** | `<standard>` (identity) | Per-table column-name map: standard column name → the column name in *your* source file. One name, not a list. Defined in `config/default_attribute_mapping.yaml`; override a value in your user config if your data uses a different name (e.g. `attribute_mapping.trees.treeh: vysstr`). Renaming happens during import. See [Attribute mapping](#attribute-mapping) below. |
+| **canopy.using_lai** | False | Use LAI raster instead of point tree data for canopy |
+| **canopy.lai_mod** | 1.0 | Multiplier applied to the LAI raster — use for scenario generation |
+| **canopy.canopy_height_mod** | 1.0 | Multiplier applied to the canopy height raster — use for scenario generation |
+| **prepare_albedo_type** | False | Populate albedo_pars from vegetation/pavement/water type albedo tables instead of the default calculation |
+| **vegetation_type_albedos.N.broadband** | varies | Broadband albedo for PALM vegetation type N |
+| **vegetation_type_albedos.N.shortwave** | varies | Shortwave albedo for PALM vegetation type N |
+| **vegetation_type_albedos.N.longwave** | varies | Longwave albedo for PALM vegetation type N |
+| **pavement_type_albedos.N.broadband** | 0.17 | Broadband albedo for PALM pavement type N |
+| **water_type_albedos.N.broadband** | 0.06 | Broadband albedo for PALM water type N |
+| **building_type_albedos.N.wall.broadband** | varies | Broadband wall albedo for building type N |
+| **building_type_albedos.N.roof.broadband** | varies | Broadband roof albedo for building type N |
 
-canopy:
-    using_lai: False
-    lai_mod: 1.0   -- Multiplication of lai raster
-    canopy_height_mod: 1.0 -- Multiplication of canopy height raster -->> mainly for scenario generation
+---
 
-prepare_albedo_type: False   # A option to prepare albedo pars from those parameters
-vegetation_type_albedos:
-    1:
-        broadband: 0.08
-        shortwave: 0.08
-        longwave: 0.08   -- Albedo values inserted into PALM. Maily for scenario generation
+## Shortcuts used in building_pars / building_surface_pars formulas
 
-### Shortcuts
-l ... landcover, r ... building roof, w ... building wall (above groud floor level) \
-pr ... roof, pg ... ground floor, pu ... upper, pd ... downward facing, b ... bridge
+| Shortcut | Meaning |
+|:---------|:--------|
+| `l` | landcover surface |
+| `r` | building roof |
+| `w` | building wall (above ground floor level) |
+| `pr` | roof surface parameters |
+| `pg` | ground floor wall parameters |
+| `pu` | upper floor wall parameters |
+| `pd` | downward-facing surface |
+| `b` | bridge |
+| `p` | pavement/general surface |
+
+---
+
+## Attribute mapping
+
+PALM-GeM standardizes the column names of the imported vector layers during the
+`initialize_domain` task. The mapping is split across two files:
+
+- **`config/default_attribute_mapping.yaml`** (user-facing). For each input
+  table it maps the **standard** column name to the name used in *your* source
+  file — one name, not a list. The default is identity (your data already uses
+  the standard name). To use your own column name, override just the value in
+  your user config:
+
+  ```yaml
+  attribute_mapping:
+    trees:
+      treeh: vysstr        # your file calls tree height "vysstr"
+    walls:
+      wallcatd: stenakatd
+  ```
+
+  During import, any source column that is present is renamed to its standard
+  name. Tables are keyed by their logical name from the `tables:` section
+  (`landcover`, `walls`, `roofs`, `trees`).
+
+- **`config/default_attribute_spec.yaml`** (developer-facing). For each table it
+  lists which standard attributes are `necessary` versus `optional`:
+
+  - a **necessary** attribute that cannot be found (neither the standard nor the
+    mapped source column exists) **aborts the import** with an error;
+  - any other (optional) missing attribute only logs a **warning** and the run
+    continues.
+
+  The check runs only for tables that were actually imported, so level-of-detail
+  layers that are simply absent never cause a failure. Surface-property lookup
+  columns (emissivity, albedo, roughness, …) live in the user-provided
+  `surface_params` table with a fixed schema and are **not** part of this
+  per-table renaming — see [LOD2](lod2.md).

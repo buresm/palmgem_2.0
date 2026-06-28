@@ -1,0 +1,63 @@
+# Copyright 2018-2024 Institute of Computer Science of the Czech Academy of
+# Sciences, Prague, Czech Republic. Authors: Martin Bures, Jaroslav Resler.
+#
+# This file is part of PALM-GeM.
+#
+# PALM-GeM is free software: you can redistribute it and/or modify it under the
+# terms of the GNU General Public License as published by the Free Software
+# Foundation, either version 3 of the License, or (at your option) any later
+# version.
+#
+# PALM-GeM is distributed in the hope that it will be useful, but WITHOUT ANY
+# WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR
+# A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License along with
+# PALM-GeM. If not, see <https://www.gnu.org/licenses/>.
+
+database:
+  user: 'postgres'
+  password: 'postgres'
+  database: 'palm_static'
+  host: 'localhost'
+  port: 5433
+
+pg_owner: 'postgres'
+
+run_tasks:
+  - gis_import
+  - setup
+  - initialize_domain
+  - static_driver
+  - finalize
+
+input_schema: 'inputs_carmine_prague_example_temp'
+
+domain:
+    name: 'prague'
+    scenario: 'example'
+    parent_domain_schema: ''
+    dx: 10.0
+    dy: 10.0
+    dz: 10.0
+    nx: 100
+    ny: 100
+    cent_x: 455502.0
+    cent_y: 5550067.0
+
+data_imports:
+  vectors:
+    landcover:
+      path: gis_sources/landcover.shp
+      table: landcover
+      srid: 32633
+
+  rasters:
+      dem:
+        path: gis_sources/dem.tif
+        table: dem
+        srid: 32633
+
+psql_path: C:\Program Files\PostgreSQL\18\bin\psql.exe
+ogr2ogr_path: C:\Users\bures\AppData\Local\Programs\OSGeo4W\bin\ogr2ogr.exe
+raster2psql_path: C:\Program Files\PostgreSQL\18\bin\raster2pgsql.exe

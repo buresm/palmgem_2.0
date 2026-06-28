@@ -1,11 +1,16 @@
-follow [preprocesor documentations](../../docs/run_prerocessor.md)
-1) from OpenStreetMap download Prague. Use user [QGIS procedure](../../docs/user_preproces.md) to clip unnecessary polygons.
-2) from UrbanAtlas download Prague. Use user [QGIS procedure](../../docs/user_preproces.md) to clip unnecessary polygons.
-3) from EU-DEM website download zip file. Use user [QGIS procedure](../../docs/user_preproces.md) to clip unnecessary raster tiles.
-4) from UrbanAtlas building height download Prague. Use user [QGIS procedure](../../docs/user_preproces.md) to clip unnecessary raster tiles.
-5) Configure importing shell script: [import_pgsql_prague.sh](import_pgsql_prague.sh). Use correct path for shapefiles and raster files. 
-6) Configure user credential and password, database name and connection in [default_share.yaml](../../config/default_share.yaml) or directly in preprocessor config [prague.yaml](prague.yaml). Finish [prague.yaml](prague.yaml) configuration, change if necessary input domain extent. 
-7) Run preprocessing script: "python3 main_urban_atlas_preprocess.py -c examples/prague/prague.yaml". See log in log folder.
-8) Using QGIS check imported dataset, follow [visualization](../../docs/visuallization.md)
-9) Check [default configuration](../../config/default_config.yaml) and example [Prague config](prague_palm.yaml). Run "python3 main_palm_static.py -c examples/prague/prague_palm.yaml". See log in logs. 
-10) Using QGIS check created grid, follow [visualization](../../docs/visuallization.md). Check created png files in visual_check/prague folder. See created static driver in output folder.
+# Prague example
+
+Follow [preprocessor documentation](../../docs/run_preprocessor.md) for the full workflow.
+
+## Steps
+
+1. Download Prague from **OpenStreetMap**. Use the [QGIS procedure](../../docs/user_preprocess.md) to clip to the area of interest.
+2. Download Prague from **UrbanAtlas**. Use the [QGIS procedure](../../docs/user_preprocess.md) to clip unnecessary polygons.
+3. Download a **EU-DEM** tile covering Prague. Use the [QGIS procedure](../../docs/user_preprocess.md) to clip the raster to the area of interest.
+4. Download the **UrbanAtlas building height** raster for Prague. Clip as above.
+5. Configure the import script [import_pgsql_prague.sh](import_pgsql_prague.sh) with the correct paths to your downloaded files.
+6. Set database credentials in `.env` (copy from `.env.example`) or directly in [prague.yaml](prague.yaml). Review domain extent settings in [prague.yaml](prague.yaml).
+7. Run the GIS import: `python main.py -c examples/prague/prague.yaml`  — check the log in `logs/`.
+8. Inspect the imported data in QGIS — see [visualization guide](../../docs/visualization.md).
+9. Review the static driver config [prague_palm.yaml](prague_palm.yaml) and run: `python main.py -c examples/prague/prague_palm.yaml`
+10. Check output in QGIS, `visual_check/prague/`, and `output/`.

@@ -74,6 +74,12 @@ for i in ${!rlayers[*]}; do
 done
 
 # create params table and copy data from csv
+#
+# NOTE (legacy/optional): PALM-GeM now ships surface params as
+# config/surface_params.csv and the initialize_domain task builds the
+# surface_params table for you (override via the surface_params_file config
+# key). This block is no longer required and is kept only for reference / for
+# users who prefer to pre-load surface_params into the input schema manually.
 if [ -e ${base_path}/${surface_params} ]
 then
 	echo "Surface params table exist, data are loaded" >> ${log_file} 2>&1

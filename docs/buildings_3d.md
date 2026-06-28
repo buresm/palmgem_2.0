@@ -1,24 +1,47 @@
-# Buildings 3d description
-In Palm-Gem, 3d buildings including bridges, overhanging structures and passages is included. Placing of 3D buildings is done according to Palm official documentation. In special case with bridges, bottom of bridge grid cells are placed above terrain with height defined by extras raster. Top of bridge is placed above bottom with configurable height build_3d.bridge_width. In case of overhanging structures and passages, the buildings 3d are firstly created as 2d, subsequently in places where extras_shp are defined, the height of building's bottom is calculated by joining grid with raster extras. \
-With this approach, only structures between ground and building's bottom are available. In project it is prepared to include multiple empty zones in buildings in future (e.g., include cascade of balconies).\
-This module requires extras raster and extras_shp polygons tables, all parameters are include in tables bellow. 
+# 3D buildings
 
-| Attribute | Type  | Values | Desription |
-|:----------|:------|:-------|:----------------------|
-| gid       | int   | >1     | unique identified for each polygon |
-| type      | int   | > 900  | type of building |
-| typeu     | int   | > 1    | type of polygon under bridge |
-| typed     | int   | > 1    | type of polygon above bridge | 
-| class3d   | char  | char   | type of structure, available 'bridge', 'passage', 'overhang' |
+PALM-GeM supports 3D building structures including **bridges**, **overhanging structures**, and **passages**. Placement follows the PALM PIDS specification.
 
-Raster table: 
+## How it works
 
-| Attribute | Type  | Values | Desription |
-|:----------|:------|:-------|:----------------------|
-| gid       | int   | >1     | unique identified for each raster |
-| rast      | real  | > 1.0  | height between ground and first building grid |
+Standard (2D) buildings define a footprint with a single bottom-at-ground and a top at building height. The 3D extension allows the bottom of a building volume to be lifted off the ground:
 
+- **Bridge** — the grid cells between ground level and the bridge bottom are left open. The bridge bottom height is taken from the `extras` raster; the bridge top is at `extras + build_3d.bridge_width`.
+- **Overhang / passage** — the structure is first created as a standard 2D building. Wherever an `extras_shp` polygon is defined, the building bottom is raised to the height given by the `extras` raster, creating the void below.
 
-During processing of 3d structure, checking routines are used. E.g., gaps with size of 1 grid are omitted. \
-In current version, construction of bridges are done to create as close as possible structures. But main problems are mainly in data availability and resolution. Out suggestion is to use 3D strucure only in < 3 m resolutions. 
-Note: Cut-Cell-Topograghy is not compatible with buildings 3D, resulting to turn off buildings 3D feature in case do_cct is True.
+With this approach only a single empty zone per column is supported. Support for multiple void zones (e.g. stacked balconies) is planned for future releases.
+
+> **Note:** 3D buildings are incompatible with cut-cell topography (`do_cct: True`). When CCT is enabled, the 3D buildings feature is automatically disabled.
+>
+> **Resolution guidance:** 3D structures are best represented at resolutions below 3 m; at coarser resolutions, data quality and grid cell count limit fidelity.
+
+## Required input data
+
+Two additional tables must be imported into PostGIS for the 3D buildings feature:
+
+### `extras_shp` — polygon shapefile
+
+| Attribute | Type | Values | Description |
+|:----------|:-----|:-------|:------------|
+| gid       | int  | ≥ 1   | Unique polygon identifier |
+| type      | int  | ≥ 900 | Building type (PALM building range) |
+| typeu     | int  | ≥ 1   | Surface type of the space *under* the structure |
+| typed     | int  | ≥ 1   | Surface type of the space *above* the structure |
+| class3d   | char |        | Structure class: `bridge`, `passage`, or `overhang` |
+
+### `extras` — raster
+
+| Attribute | Type | Values | Description |
+|:----------|:-----|:-------|:------------|
+| rast      | real | > 0.0  | Height (m) of the structure bottom above ground |
+
+## Configuration keys
+
+| Key | Default | Description |
+|:----|:--------|:------------|
+| `tables.extras_shp` | `extras_shp` | Name of the polygon table in the case schema |
+| `tables.extras`     | `extras`     | Name of the raster table in the case schema |
+| `build_3d.bridge_width` | `2.0` | Vertical extent of the bridge structure (m) |
+| `build_3d.bridge`   | `bridge`   | `class3d` value for bridge structures |
+| `build_3d.passage`  | `passage`  | `class3d` value for passage structures |
+| `build_3d.overhanging` | `overhang` | `class3d` value for overhanging structures |

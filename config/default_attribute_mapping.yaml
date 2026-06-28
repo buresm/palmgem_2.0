@@ -1,0 +1,64 @@
+# Copyright 2018-2024 Institute of Computer Science of the Czech Academy of
+# Sciences, Prague, Czech Republic. Authors: Martin Bures, Jaroslav Resler.
+#
+# This file is part of PALM-GeM.
+#
+# PALM-GeM is free software: you can redistribute it and/or modify it under the
+# terms of the GNU General Public License as published by the Free Software
+# Foundation, either version 3 of the License, or (at your option) any later
+# version.
+#
+# PALM-GeM is distributed in the hope that it will be useful, but WITHOUT ANY
+# WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR
+# A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License along with
+# PALM-GeM. If not, see <https://www.gnu.org/licenses/>.
+
+# ---------------------------------------------------------------------------
+# USER attribute-name mapping (edit this).
+#
+# For each input table, map the STANDARD column name (the key, used everywhere
+# downstream) to the column name as it appears in YOUR source file (the value).
+# The default is identity — your data is assumed to already use the standard
+# name. If your file uses a different name, change only the value; the column is
+# renamed to the standard name during import into PostgreSQL.
+#
+#   <standard_name>: <name in your source file>
+#
+# One column -> one name (not a list). Tables are sorted by name. Which of these
+# are mandatory vs optional is defined by developers in default_attribute_spec.yaml
+# (a missing mandatory attribute aborts the import; a missing optional one only
+# warns). Keys here are the logical table names from the `tables:` section.
+# ---------------------------------------------------------------------------
+attribute_mapping:
+
+    # Landcover polygons. `catland` indexes the surface_params table (LOD2).
+    landcover:
+        catland:   catland       # legacy name e.g. katland
+        catlandd:  catlandd       # legacy name e.g. katlandd
+        catlandu:  catlandu       # legacy name e.g. katlandu
+
+    # Roof footprints (LOD2). `thickness` = roof layer thickness.
+    roofs:
+        thickness: thickness      # legacy name e.g. tloustka
+
+    # Tree points. See docs/tree.md for the meaning of each attribute.
+    trees:
+        treeh:     treeh          # legacy name e.g. vysstr  (tree height)
+        trunkh:    trunkh         # legacy name e.g. vyskmen (trunk height)
+        trunkr:    trunkr         # legacy name e.g. polokmen (trunk radius)
+        crownr:    crownr         # legacy name e.g. polokor (crown radius)
+        crownshp:  crownshp       # legacy name e.g. tvarkor (crown shape)
+        tree_type: tree_type      # legacy name e.g. typstr / treetype
+
+    # Vertical wall lines (LOD2). `*d` = lower levels, `*u` = upper levels.
+    walls:
+        wallcatd:  wallcatd       # legacy name e.g. stenakatd (surface_params code, lower)
+        wallcatu:  wallcatu       # legacy name e.g. stenakath (surface_params code, upper)
+        albedod:   albedod        # legacy name e.g. albedo0
+        albedou:   albedou        # legacy name e.g. albedoh / albedo1
+        wallfracd: wallfracd      # legacy name e.g. wallfrac0
+        wallfracu: wallfracu      # legacy name e.g. wallfrach / wallfrac1
+        winfracd:  winfracd       # legacy name e.g. winfrac0
+        winfracu:  winfracu       # legacy name e.g. winfrach / winfrac1

@@ -1,10 +1,27 @@
-# Import dataset to PostgreSQL database
-### Linux terminal version
-Use prepared shell script in import_to_sql folder import_pgsql.sh to import downloaded data into postgresql database (please check names and paths of the importing files). After successful import you can check imported geodata using QGIS, detailed instruction can be found [here](visuallization.md).
-### Python version (mainly for Windows)
-Use prepared python script `import_sql.py`. Fill in a prepared configuration for importing `example_import.yaml` in `config` folder. Defined connection to database. Select if you want to create a schema from scratch (delete previous if exists, `scratch_import=True`) or append existing. Fill the path to files you would like to import. \
-Run the script as follows:
+# Import datasets to PostgreSQL
+
+GIS data is imported into PostGIS by the `gis_import` task (`GisImporter`), which wraps `ogr2ogr` (vectors) and `raster2pgsql` + `psql` (rasters). Add `gis_import` to `run_tasks` in your config.
+
+List files to import under `data_imports` in your config YAML — `vectors` and `rasters` are dictionaries keyed by an arbitrary name:
+
+```yaml
+data_imports:
+  vectors:
+    landcover:
+      path: 'path/to/landcover.shp'
+      table: 'imported_landcover'
+      srid: 32633
+    osm_buildings:
+      path: 'path/to/osm_buildings_a_free.shp'
+      table: 'imported_buildings'
+      srid: 32633
+  rasters:
+    dem:
+      path: 'path/to/dem.tif'
+      table: 'imported_dem'
+      srid: 3035
 ```
-python3 import_sql.py -c config_name.yaml
-```
-Log from the import is create based on import_schema name in `logs` folder.
+
+Tool paths (`ogr2ogr_path`, `raster2psql_path`, `psql_path`) must be set — see [Installation](install.md). Tables are created in `input_schema`. If the source file is not found at `path`, that entry is skipped with a warning.
+
+After import, inspect the loaded geometries in QGIS — see [visualization](visualization.md).
