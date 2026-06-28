@@ -58,8 +58,13 @@ class ShapefileImporter:
         # 2. Add the clean_env block to the execution parameters
         result = subprocess.run(cmd, env=clean_env, capture_output=True, text=True)
 
+        # A non-zero exit is not always a real failure: benign dynamic-loader
+        # warnings (e.g. "libpq.so.5: no version information available") can make
+        # ogr2ogr exit non-zero on some Linux setups even though the table was
+        # imported. Surface the detail and let the caller confirm against the DB
+        # rather than aborting on the exit code alone.
         if result.returncode != 0:
-            error(f"OGR2OGR Failed: {result.stderr}")
+            warning(f"ogr2ogr exited {result.returncode}: {result.stderr}")
             raise RuntimeError(result.stderr)
         return result.stdout
 

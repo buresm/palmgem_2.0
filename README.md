@@ -1,4 +1,4 @@
-# PALM-GeM
+# PALM-GeM 2.0
 
 **PALM-GeM** (Geospatial Data Merging and preprocessing into PALM) is a tool for preparing PALM CFD model *static driver* NetCDF files from open GIS data. It ingests UrbanAtlas, OpenStreetMap, and EU-DEM datasets into PostGIS and generates a ready-to-use static driver for PALM urban simulations at 5–10 m resolution, covering most larger European cities.
 

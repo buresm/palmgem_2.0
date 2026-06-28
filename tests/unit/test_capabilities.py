@@ -1,7 +1,7 @@
 """Unit tests for staged-run capability-flag derivation (no live DB needed)."""
 import pytest
 from src.config_loader import ConfigObj
-from src.utils.capabilities import ensure_capability_flags
+from src.utils.capabilities import ensure_capability_flags, ensure_domain_geometry
 
 
 def _make_cfg(**flags):
@@ -16,6 +16,7 @@ def _make_cfg(**flags):
             'extras': 'extras',
             'roofs': 'roofs',
             'walls': 'walls',
+            'grid': 'grid',
         },
         'type_range': {'building_min': 900, 'building_max': 999},
         'landcover': {'surface_fractions': False},
@@ -28,10 +29,11 @@ def _make_cfg(**flags):
 class FakeDB:
     """Answers information_schema/exists/count probes without a real database."""
 
-    def __init__(self, tables=(), columns=(), building_count=0):
+    def __init__(self, tables=(), columns=(), building_count=0, min_height=None):
         self.tables = set(tables)
         self.columns = set(columns)          # set of (table, column)
         self.building_count = building_count
+        self.min_height = min_height         # answer to select min(height)
         self.queried = False
 
     def fetchone(self, query, params=None):
@@ -45,6 +47,8 @@ class FakeDB:
             return (table, column) in self.columns
         if 'count(*)' in q:
             return self.building_count
+        if 'min(height)' in q:
+            return self.min_height
         raise AssertionError(f'unexpected query: {query}')
 
 
@@ -114,3 +118,46 @@ def test_missing_flags_are_filled_not_overridden():
     assert cfg.has_buildings is False
     # the others get derived
     assert cfg.has_3d_buildings is False
+
+
+# --- ensure_domain_geometry ------------------------------------------------
+
+def test_domain_geometry_noop_when_oro_min_present():
+    """Full single-process run: oro_min already set -> never touches the DB."""
+    cfg = _make_cfg()
+    cfg.domain.update_setting('oro_min', 42.0)
+    db = FakeDB(min_height=999.0)  # DB would say something else
+    ensure_domain_geometry(cfg, db)
+    assert db.queried is False
+    assert cfg.domain.oro_min == 42.0
+
+
+def test_domain_geometry_auto_origin_derives_from_grid():
+    """origin_z == -1 (auto): both origin_z and oro_min come from min(height)."""
+    cfg = _make_cfg()
+    cfg.domain.update_setting('origin_z', -1)
+    db = FakeDB(min_height=205.0)
+    ensure_domain_geometry(cfg, db)
+    assert cfg.domain.oro_min == 205.0
+    assert cfg.domain.origin_z == 205.0
+
+
+def test_domain_geometry_predefined_origin_no_grid_query():
+    """A predefined origin_z is reused for oro_min without querying the grid."""
+    cfg = _make_cfg()
+    cfg.domain.update_setting('origin_z', 120.0)
+    db = FakeDB(min_height=999.0)
+    ensure_domain_geometry(cfg, db)
+    assert db.queried is False
+    assert cfg.domain.oro_min == 120.0
+    assert cfg.domain.origin_z == 120.0
+
+
+def test_domain_geometry_null_grid_defaults_to_zero():
+    """Empty grid (min(height) is NULL) falls back to 0.0 like initialize_domain."""
+    cfg = _make_cfg()
+    cfg.domain.update_setting('origin_z', -1)
+    db = FakeDB(min_height=None)
+    ensure_domain_geometry(cfg, db)
+    assert cfg.domain.oro_min == 0.0
+    assert cfg.domain.origin_z == 0.0

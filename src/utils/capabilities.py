@@ -75,3 +75,44 @@ def ensure_capability_flags(cfg, db):
         if key not in cfg._settings:
             cfg.update_setting(key, value)
             debug('derived capability flag {} = {}', key, value)
+
+
+def ensure_domain_geometry(cfg, db):
+    """Make the derived vertical domain geometry available without re-running
+    initialize_domain.
+
+    ``calculate_origin_z_oro_min`` sets ``cfg.domain.oro_min`` (and ``origin_z``
+    when it is the ``-1`` "auto" sentinel) in memory during initialize_domain.
+    The driver tasks read ``cfg.domain.oro_min``/``origin_z``; when a driver runs
+    on its own (staged execution) those are absent and reading them raises
+    ``AttributeError``. This reconstructs them from the persisted grid the same
+    way initialize_domain did — ``oro_min`` is the minimum cell ``height`` — so
+    the task can run independently of the process that built the domain.
+
+    Only fills what is missing: a full single-process run, where
+    initialize_domain already set ``oro_min``, is left exactly as-is.
+    """
+    if 'oro_min' in cfg.domain._settings:
+        return
+
+    origin_z = getattr(cfg.domain, 'origin_z', -1)
+
+    if origin_z == -1:
+        # auto origin: mirror initialize_domain — pull min height from the case
+        # schema (or the parent domain when nesting).
+        source_schema = cfg.domain.case_schema
+        if getattr(cfg.domain, 'parent_domain_schema', '') != '':
+            source_schema = cfg.domain.parent_domain_schema
+
+        min_height = db.fetchone(
+            f'select min(height) from "{source_schema}"."{cfg.tables.grid}"')
+        min_height = min_height if min_height is not None else 0.0
+
+        progress('deriving origin_z/oro_min from grid "{}" (staged run) = {}',
+                 source_schema, min_height)
+        cfg.domain.update_setting('origin_z', min_height)
+        cfg.domain.update_setting('oro_min', min_height)
+    else:
+        # predefined origin: oro_min follows it
+        cfg.domain.update_setting('oro_min', origin_z)
+        debug('derived oro_min from configured origin_z = {}', origin_z)

@@ -29,7 +29,10 @@ class GisImporter(BaseTask):
             table = self.cfg.data_imports.vectors[vec]['table']
             srid = self.cfg.data_imports.vectors[vec]['srid']
             ogr2ogr_exe = self.cfg.ogr2ogr_path
-            if os.path.exists(path):
+            if not os.path.exists(path):
+                warning(f"File not found: path={path}")
+                continue
+            try:
                 shp_tool.import_shp(
                     file_path=path,
                     schema_name=self.cfg.input_schema,
@@ -37,8 +40,13 @@ class GisImporter(BaseTask):
                     srid=srid,
                     ogr2ogr_exe=ogr2ogr_exe,
                 )
-            else:
-                warning(f"File not found: path={path}")
+            except RuntimeError as e:
+                # ogr2ogr may exit non-zero on benign loader warnings (e.g.
+                # "libpq.so.5: no version information available") while still
+                # importing the table. Don't crash on the message alone — the
+                # DB check below is the source of truth.
+                warning(f"ogr2ogr reported an issue importing '{table}': {e}")
+            self._verify_imported(self.cfg.input_schema, table)
 
         # 3. Process all Rasters
         rasters = dict(self.cfg.data_imports.rasters._settings)
@@ -49,8 +57,11 @@ class GisImporter(BaseTask):
             srid = self.cfg.data_imports.rasters[rast]['srid']
             psql = self.cfg.psql_path
             raster2psql = self.cfg.raster2psql_path
-            if os.path.exists(path):
-                debug(f"Importing raster: {path}")
+            if not os.path.exists(path):
+                warning(f"File not found: {path}")
+                continue
+            debug(f"Importing raster: {path}")
+            try:
                 rast_tool.import_tiff(
                     file_path=path,
                     schema_name=self.cfg.input_schema,
@@ -59,7 +70,32 @@ class GisImporter(BaseTask):
                     psql=psql,
                     raster2psql=raster2psql
                 )
-            else:
-                warning(f"File not found: {path}")
+            except RuntimeError as e:
+                # Same tolerance as vectors: confirm against the DB rather than
+                # aborting purely on a non-zero subprocess exit / loader warning.
+                warning(f"raster import reported an issue for '{table}': {e}")
+            self._verify_imported(self.cfg.input_schema, table)
 
         debug("Geospatial data ingestion complete.")
+
+    def _verify_imported(self, schema, table):
+        """Confirm a table was actually created and populated in PostgreSQL.
+
+        Used as the source of truth after an importer subprocess, so a benign
+        non-zero exit (e.g. a dynamic-loader warning) does not abort the run
+        when the data is in fact present. Raises only when the table is genuinely
+        missing; an empty table is warned about but allowed through.
+        """
+        exists = self.fetchone(
+            "select exists(select 1 from information_schema.tables "
+            "where table_schema = %s and table_name = %s)",
+            (schema, table))
+        if not exists:
+            raise RuntimeError(
+                f"Import failed: table {schema}.{table} was not created")
+
+        rows = self.fetchone(f'select count(*) from "{schema}"."{table}"')
+        if not rows:
+            warning(f"Imported table {schema}.{table} exists but is empty (0 rows)")
+        else:
+            debug(f"verified {schema}.{table} imported ({rows} rows)")

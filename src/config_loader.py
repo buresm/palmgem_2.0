@@ -170,7 +170,21 @@ def load_config(config_path='', config_folder='config'):
         user_cfg = cfg_user_dir / config_path
         if user_cfg.exists():
             with open(user_cfg, 'r') as f:
-                config._ingest_dict(yaml.load(f, Loader=yaml.FullLoader), check_exist=True)
+                user_dict = yaml.load(f, Loader=yaml.FullLoader) or {}
+
+            # `data_imports` is a dynamic, user-keyed section (each import is
+            # named freely). Deep-merging it would leave the default example
+            # entries (e.g. landcover_test/dem_test) alongside the user's, so
+            # gis_import would try to import them too. Pull it out and replace
+            # it wholesale, also skipping the key-existence warnings that its
+            # free-form keys would otherwise trigger.
+            data_imports = user_dict.pop('data_imports', None)
+
+            config._ingest_dict(user_dict, check_exist=True)
+
+            if data_imports is not None:
+                config._settings.pop('data_imports', None)
+                config._ingest_dict({'data_imports': data_imports})
         else:
             # A config was explicitly requested but not found. Fail loudly rather
             # than silently running on defaults (wrong domain/database/tasks).

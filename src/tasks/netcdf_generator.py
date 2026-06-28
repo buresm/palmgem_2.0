@@ -8,16 +8,18 @@ from datetime import datetime
 import numpy as np
 from math import ceil
 from .share_utils import variable_visualization, create_slanted_vtk
-from src.utils.capabilities import ensure_capability_flags
+from src.utils.capabilities import ensure_capability_flags, ensure_domain_geometry
 
 class StaticDriverGen(BaseTask):
     """ task for generating the palm static driver netcdf file. """
 
     def run(self):
         """ """
-        # Derive has_buildings / lod2 / ... from the schema when this task runs on
-        # its own (staged run), so it does not require initialize_domain in-process.
+        # Derive has_buildings / lod2 / ... and oro_min / origin_z from the schema
+        # when this task runs on its own (staged run), so it does not require
+        # initialize_domain in-process.
         ensure_capability_flags(self.cfg, self.db)
+        ensure_domain_geometry(self.cfg, self.db)
         self.prepare_file()
         self.fill_file()
         self.finish_file()
@@ -1390,10 +1392,10 @@ class StaticDriverGen(BaseTask):
                     {p_text} 
                 from "{self.cfg.domain.case_schema}"."{self.cfg.tables.grid}" g 
                 left outer join "{self.cfg.domain.case_schema}"."{self.cfg.tables.buildings_grid}" b on b.id = g.id 
-                left outer join "{self.cfg.domain.case_schema}"."{self.cfg.tables.roofs}" r on r.gid = b.rid 
+                left outer join "{self.cfg.domain.case_schema}"."{self.cfg.tables.roofs}" r on r.{self.cfg.idx.roofs} = b.rid 
                 left outer join "{self.cfg.domain.case_schema}"."{self.cfg.tables.surface_params}" p on p.code = cast(r.material as integer) + %s 
                 left outer join "{self.cfg.domain.case_schema}"."{self.cfg.tables.building_walls}" bw on bw.id = g.id and not bw.isroof 
-                left outer join "{self.cfg.domain.case_schema}"."{self.cfg.tables.walls}" w on w.gid = bw.wid 
+                left outer join "{self.cfg.domain.case_schema}"."{self.cfg.tables.walls}" w on w.{self.cfg.idx.walls} = bw.wid 
                 left outer join "{self.cfg.domain.case_schema}"."{self.cfg.tables.surface_params}" pg on pg.code = w.wallcatd 
                 left outer join "{self.cfg.domain.case_schema}"."{self.cfg.tables.surface_params}" pu on pu.code = w.wallcatu 
                 order by g.j, g.i
@@ -1623,9 +1625,9 @@ class StaticDriverGen(BaseTask):
             # main surface parameter query (strictly lower case)
             sql_final = f"""
                 select {p_text} from "{case_schema}"."{self.cfg.tables.surfaces}" s 
-                left outer join "{case_schema}"."{self.cfg.tables.roofs}" r on r.gid = s.rid 
+                left outer join "{case_schema}"."{self.cfg.tables.roofs}" r on r.{self.cfg.idx.roofs} = s.rid 
                 left outer join "{case_schema}"."{self.cfg.tables.surface_params}" pr on pr.code = cast(r.material as integer) + {self.cfg.surf_range.roof_min} 
-                left outer join "{case_schema}"."{self.cfg.tables.walls}" w on w.gid = s.wid 
+                left outer join "{case_schema}"."{self.cfg.tables.walls}" w on w.{self.cfg.idx.walls} = s.wid 
                 {extra_joins} 
                 left outer join "{case_schema}"."{self.cfg.tables.surface_params}" pg on pg.code = w.wallcatd 
                 left outer join "{case_schema}"."{self.cfg.tables.surface_params}" pu on pu.code = w.wallcatu 
@@ -1693,7 +1695,7 @@ class StaticDriverGen(BaseTask):
                 from "{self.cfg.domain.case_schema}"."{self.cfg.tables.grid}" g 
                 left outer join "{self.cfg.domain.case_schema}"."{self.cfg.tables.landcover}" l on l.lid = g.lid 
                 left outer join "{self.cfg.domain.case_schema}"."{self.cfg.tables.buildings_grid}" b on b.id = g.id 
-                left outer join "{self.cfg.domain.case_schema}"."{self.cfg.tables.roofs}" r on r.gid = b.rid 
+                left outer join "{self.cfg.domain.case_schema}"."{self.cfg.tables.roofs}" r on r.{self.cfg.idx.roofs} = b.rid 
                 order by g.j, g.i
             """
             res_land = self.execute(sql_land_roof)
@@ -1705,7 +1707,7 @@ class StaticDriverGen(BaseTask):
                     case when bw.id is not null then {self.cfg.albedo_pars[par][2]} else null end 
                 from "{self.cfg.domain.case_schema}"."{self.cfg.tables.grid}" g 
                 left outer join "{self.cfg.domain.case_schema}"."{self.cfg.tables.building_walls}" bw on bw.id = g.id and not bw.isroof 
-                left outer join "{self.cfg.domain.case_schema}"."{self.cfg.tables.walls}" w on w.gid = bw.wid 
+                left outer join "{self.cfg.domain.case_schema}"."{self.cfg.tables.walls}" w on w.{self.cfg.idx.walls} = bw.wid 
                 left outer join "{self.cfg.domain.case_schema}"."{self.cfg.tables.surface_params}" pw on pw.code = w.wallcatu 
                 order by g.j, g.i
             """
@@ -1751,10 +1753,10 @@ class StaticDriverGen(BaseTask):
                 case when b.id is not null then {cfg_par} else null end
             from "{self.cfg.domain.case_schema}"."{self.cfg.tables.grid}" g
             left outer join "{self.cfg.domain.case_schema}"."{self.cfg.tables.buildings_grid}" b on b.id = g.id
-            left outer join "{self.cfg.domain.case_schema}"."{self.cfg.tables.roofs}" r on r.gid = b.rid
+            left outer join "{self.cfg.domain.case_schema}"."{self.cfg.tables.roofs}" r on r.{self.cfg.idx.roofs} = b.rid
             left outer join "{self.cfg.domain.case_schema}"."{self.cfg.tables.surface_params}" pr on pr.code = cast(r.material as integer) + %s
             left outer join "{self.cfg.domain.case_schema}"."{self.cfg.tables.building_walls}" bw on bw.id = g.id and not bw.isroof 
-            left outer join "{self.cfg.domain.case_schema}"."{self.cfg.tables.walls}" w on w.gid = bw.wid 
+            left outer join "{self.cfg.domain.case_schema}"."{self.cfg.tables.walls}" w on w.{self.cfg.idx.walls} = bw.wid 
             left outer join "{self.cfg.domain.case_schema}"."{self.cfg.tables.surface_params}" pg on pg.code = w.wallcatd
             left outer join "{self.cfg.domain.case_schema}"."{self.cfg.tables.surface_params}" pu on pu.code = w.wallcatu
             order by g.j, g.i
@@ -1939,6 +1941,7 @@ class SlurbDriverGen(StaticDriverGen):
     def run(self):
         """ """
         ensure_capability_flags(self.cfg, self.db)
+        ensure_domain_geometry(self.cfg, self.db)
         self.prepare()
         self.fill_file()
         self.finish_file()

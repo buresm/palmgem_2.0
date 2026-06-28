@@ -43,10 +43,11 @@ class CctProcessing(BaseTask):
         if not self.cfg.do_cct:
             return
 
-        # allow staged execution: derive has_buildings etc. from the schema if
-        # initialize_domain did not run in this process.
-        from src.utils.capabilities import ensure_capability_flags
+        # allow staged execution: derive has_buildings etc. and oro_min/origin_z
+        # from the schema if initialize_domain did not run in this process.
+        from src.utils.capabilities import ensure_capability_flags, ensure_domain_geometry
         ensure_capability_flags(self.cfg, self.db)
+        ensure_domain_geometry(self.cfg, self.db)
 
         progress('Run CCT Module')
         self.slanted_surface_init()

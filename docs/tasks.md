@@ -45,10 +45,12 @@ Two schemas hold all state:
 | `finalize` | `FinalizeTask` | — | — | — (always runs) |
 
 > The driver tasks (`static_driver`, `slurb_driver`, `cct_processing`/`cct_driver`) depend on
-> a few **capability flags** (`has_buildings`, `has_3d_buildings`, `has_surface_params`,
-> `lod2`) that `initialize_domain` normally derives in memory. When a driver task is run on
-> its own — i.e. in a *separate process* from `initialize_domain` — those flags are rebuilt
-> automatically from the persisted `case_schema` (see `src/utils/capabilities.py`), so the
+> a few values that `initialize_domain` normally derives in memory: the **capability flags**
+> (`has_buildings`, `has_3d_buildings`, `has_surface_params`, `lod2`) and the **vertical
+> domain geometry** (`domain.oro_min`, and `domain.origin_z` when it is the `-1` auto
+> sentinel). When a driver task is run on its own — i.e. in a *separate process* from
+> `initialize_domain` — these are rebuilt automatically from the persisted `case_schema`
+> (`oro_min` from the grid's minimum cell height; see `src/utils/capabilities.py`), so the
 > task runs independently. No extra configuration is needed.
 
 ## Config keys that must match across runs
