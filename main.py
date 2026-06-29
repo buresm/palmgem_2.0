@@ -1,4 +1,5 @@
 import time
+import traceback
 from argparse import ArgumentParser
 from src.config_loader import load_config
 from src.logger import setup_logging, progress, debug, error, warning
@@ -52,6 +53,9 @@ def main(args=None):
     except Exception as e:
         failed_task = current_task
         error(f"Critical failure in task '{failed_task}': {e}; aborting pipeline")
+        # log the full traceback so the failing line is visible, not just the message
+        for line in traceback.format_exc().rstrip().splitlines():
+            debug(line)
 
     # Always run finalizer and close the DB, even after a failure, so temporary
     # state is cleaned up.

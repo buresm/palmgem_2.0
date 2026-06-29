@@ -1333,9 +1333,15 @@ class StaticDriverGen(BaseTask):
             verbose(f'Modifying winfrac in {vn} where winfrac > {limit} ({count} cells). '
                     f'Setting winfrac = {limit} and wallfrac = {wall_val}')
 
-            # apply corrections using the mask
-            self.ncfile.variables[vn][ipar_wi, mask] = limit
-            self.ncfile.variables[vn][ipar_wa, mask] = wall_val
+            # apply corrections via 2-D numpy layers, then write each layer back
+            # whole: netCDF4 rejects a scalar index combined with a 2-D boolean
+            # mask (var[ipar, mask2d] -> "index cannot be multidimensional").
+            win_data[mask] = limit
+            self.ncfile.variables[vn][ipar_wi, ...] = win_data
+
+            wall_data = self.ncfile.variables[vn][ipar_wa, ...]
+            wall_data[mask] = wall_val
+            self.ncfile.variables[vn][ipar_wa, ...] = wall_data
 
         return True
 
@@ -1421,12 +1427,20 @@ class StaticDriverGen(BaseTask):
 
         # 4. physical consistency check: window fraction capping
         # indexes 1 and 22 are typically window fractions in palm-4u
+        # NOTE: netCDF4 cannot mix a scalar index with a 2-D boolean mask
+        # (var[idx, mask2d] -> "index cannot be multidimensional"); read each
+        # (y, x) layer into a numpy array, mask there, then write it back whole.
         for idx_win, idx_wall in [(1, 0), (22, 21)]:
-            win_mask = self.ncfile.variables[vn][idx_win, ...] > 0.95
+            win_layer = self.ncfile.variables[vn][idx_win, ...]
+            win_mask = win_layer > 0.95
             if np.any(win_mask):
                 verbose(f'Capping window fraction at 0.95 for parameter index {idx_win}')
-                self.ncfile.variables[vn][idx_win, win_mask] = 0.95
-                self.ncfile.variables[vn][idx_wall, win_mask] = 0.05
+                win_layer[win_mask] = 0.95
+                self.ncfile.variables[vn][idx_win, ...] = win_layer
+
+                wall_layer = self.ncfile.variables[vn][idx_wall, ...]
+                wall_layer[win_mask] = 0.05
+                self.ncfile.variables[vn][idx_wall, ...] = wall_layer
 
         debug(f'Variable {vn} completely written.')
         return True
