@@ -2443,7 +2443,7 @@ class InitializeDomainTask(BaseTask):
         sql_join = f"""
             update "{self.cfg.domain.case_schema}"."{self.cfg.tables.buildings_grid}" b 
             set rid = (
-                select gid from "{self.cfg.domain.case_schema}"."{self.cfg.tables.roofs}" as r 
+                select {self.cfg.idx.roofs} from "{self.cfg.domain.case_schema}"."{self.cfg.tables.roofs}" as r 
                 where st_intersects(r.geom, b.point) 
                 order by st_distance(r.geom, b.point) 
                 limit 1

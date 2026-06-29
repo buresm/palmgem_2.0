@@ -1580,7 +1580,7 @@ class StaticDriverGen(BaseTask):
 
         # 4. fill individual parameters based on configuration
         for par in self.cfg.building_surface_pars._settings.keys():
-            has_extras = self.cfg.tables.extras_shp in self.vtabs
+            has_extras = self.cfg.tables.extras_shp in self.cfg.vtabs
             p_configs = self.cfg.building_surface_pars[par]
 
             # normalize parameter lists
