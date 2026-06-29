@@ -38,6 +38,14 @@ attribute_mapping:
         catland:   catland       # legacy name e.g. katland
         catlandd:  catlandd       # legacy name e.g. katlandd
         catlandu:  catlandu       # legacy name e.g. katlandu
+        
+    # Imported Landcover polygons
+    imported_landcover:
+        code: code
+        
+#    # Imported StreetMap polygons
+    imported_streetmap:
+        osm_id: osm_id
 
     # Roof footprints (LOD2). `thickness` = roof layer thickness.
     roofs:

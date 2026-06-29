@@ -26,7 +26,7 @@ class UrbanAtlasOSM(BaseTask):
     def create_envelope(self):
         compute_envelope(
             self.cfg, self.db,
-            schema=self.cfg.domain.case_schema,
+            schema=self.cfg.input_schema,
             table=self.cfg.tables.im_landcover_or,
             srid=self.cfg.srid,
         )
@@ -65,7 +65,7 @@ class UrbanAtlasOSM(BaseTask):
         sqltext = "select palm_create_grid(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
 
         params = (
-            self.cfg.domain.case_schema,
+            self.cfg.input_schema,
             self.cfg.tables.fishnet,
             nx,
             ny,
@@ -97,7 +97,7 @@ class UrbanAtlasOSM(BaseTask):
 
             # 1. obtain union of existing landcover
             verbose('obtaining union of landcover')
-            sql_union = f'select st_union(geom) as geom from "{self.cfg.domain.case_schema}"."{self.cfg.tables.im_landcover}"'
+            sql_union = f'select st_union(geom) as geom from "{self.cfg.input_schema}"."{self.cfg.tables.im_landcover}"'
             res_union = self.execute(sql_union)
             union = res_union[0][0] if res_union else None
 
@@ -120,7 +120,7 @@ class UrbanAtlasOSM(BaseTask):
             # 4. insert background into landcover
             if background:
                 verbose('inserting background into landcover')
-                sql_ins = f'insert into "{self.cfg.domain.case_schema}"."{self.cfg.tables.im_landcover}" (geom) values (%s::geometry)'
+                sql_ins = f'insert into "{self.cfg.input_schema}"."{self.cfg.tables.im_landcover}" (geom) values (%s::geometry)'
                 self.execute(sql_ins, (background,))
             else:
                 verbose('background geometry is empty, skipping insert')
@@ -140,19 +140,19 @@ class UrbanAtlasOSM(BaseTask):
 
         # sql logic using lower case and f-strings for table/schema identifiers
         sql_clip = f"""
-            drop table if exists "{self.cfg.domain.case_schema}"."{self.cfg.tables.im_landcover}" cascade;
+            drop table if exists "{self.cfg.input_schema}"."{self.cfg.tables.im_landcover}" cascade;
 
-            create table "{self.cfg.domain.case_schema}"."{self.cfg.tables.im_landcover}" as  
-            with f as (select geom as geom from "{self.cfg.domain.case_schema}"."{self.cfg.tables.fishnet}"), 
-                 l as (select code_2018, st_transform((st_dump(geom)).geom, %s) as geom 
-                        from "{self.cfg.domain.case_schema}"."{self.cfg.tables.im_landcover_or}" 
+            create table "{self.cfg.input_schema}"."{self.cfg.tables.im_landcover}" as  
+            with f as (select geom as geom from "{self.cfg.input_schema}"."{self.cfg.tables.fishnet}"), 
+                 l as (select code, st_transform((st_dump(geom)).geom, %s) as geom 
+                        from "{self.cfg.input_schema}"."{self.cfg.tables.im_landcover_or}" 
                         where st_intersects(st_transform(geom, %s), %s::geometry)
                         ) 
-            select code_2018, (st_dump(st_intersection(l.geom, f.geom))).geom as geom 
+            select code, (st_dump(st_intersection(l.geom, f.geom))).geom as geom 
             from l, f 
             where st_intersects(l.geom, f.geom) and st_area(l.geom) > {self.cfg.max_fishnet_split_area} 
             union all 
-            select code_2018, l.geom 
+            select code, l.geom 
             from l, f 
             where st_intersects(l.geom, f.geom) and st_area(l.geom) <= {self.cfg.max_fishnet_split_area};
         """
@@ -163,17 +163,17 @@ class UrbanAtlasOSM(BaseTask):
         # handle cleanup using .get() for safety
         if self.cfg.clean_up:
             debug('drop original landcover table')
-            sql_drop = f'drop table "{self.cfg.domain.case_schema}"."{self.cfg.tables.im_landcover_or}" cascade;'
+            sql_drop = f'drop table "{self.cfg.input_schema}"."{self.cfg.tables.im_landcover_or}" cascade;'
             self.execute(sql_drop)
 
         # use the helper function for ownership
-        self.set_table_owner(self.cfg.domain.case_schema, self.cfg.tables.im_landcover)
+        self.set_table_owner(self.cfg.input_schema, self.cfg.tables.im_landcover)
 
         verbose('adding geometry index to landcover table')
         # create gist spatial index using lower case
         sql_idx = f"""
             create index if not exists {self.cfg.tables.im_landcover}_geom_idx 
-            on "{self.cfg.domain.case_schema}"."{self.cfg.tables.im_landcover}" 
+            on "{self.cfg.input_schema}"."{self.cfg.tables.im_landcover}" 
             using gist(geom);
         """
         self.execute(sql_idx)
@@ -188,13 +188,13 @@ class UrbanAtlasOSM(BaseTask):
         # 1. create from import: transform, clip, and filter by area
         debug('creating, clipping and transforming originally streetmap imported table')
         sql_create = f"""
-            drop table if exists "{self.cfg.domain.case_schema}"."{self.cfg.tables.streetmaps}";
+            drop table if exists "{self.cfg.input_schema}"."{self.cfg.tables.streetmaps}";
 
-            create table "{self.cfg.domain.case_schema}"."{self.cfg.tables.streetmaps}" as 
+            create table "{self.cfg.input_schema}"."{self.cfg.tables.streetmaps}" as 
             select 
                 osm_id, 
                 st_transform((st_dump(geom)).geom, %s) as geom 
-            from "{self.cfg.domain.case_schema}"."{self.cfg.tables.streetmaps_or}" 
+            from "{self.cfg.input_schema}"."{self.cfg.tables.streetmaps_or}" 
             where 
                 (st_area(st_transform(geom, %s)) > %s) and
                 st_intersects(st_transform(geom, %s), %s::geometry)
@@ -202,21 +202,21 @@ class UrbanAtlasOSM(BaseTask):
         self.execute(sql_create, (self.cfg.srid, self.cfg.srid, self.cfg.max_stl_area, self.cfg.srid, self.cfg.envelope))
 
         # 2. change ownership and index
-        self.set_table_owner(self.cfg.domain.case_schema, self.cfg.tables.streetmaps)
+        self.set_table_owner(self.cfg.input_schema, self.cfg.tables.streetmaps)
 
         verbose('adding geometry index on streetmap table')
         sql_idx = f"""
             create index if not exists {self.cfg.tables.streetmaps}_geom_idx 
-            on "{self.cfg.domain.case_schema}"."{self.cfg.tables.streetmaps}" 
+            on "{self.cfg.input_schema}"."{self.cfg.tables.streetmaps}" 
             using gist(geom)
         """
         self.execute(sql_idx)
 
         # 3. add columns for processing
-        verbose('add code_2018 attribute into streetmaps table')
+        verbose('add code attribute into streetmaps table')
         sql_cols = f"""
-            alter table "{self.cfg.domain.case_schema}"."{self.cfg.tables.streetmaps}" 
-            add column if not exists code_2018 integer,
+            alter table "{self.cfg.input_schema}"."{self.cfg.tables.streetmaps}" 
+            add column if not exists code integer,
             add column if not exists cent geometry("point", %s)
         """
         self.execute(sql_cols, (self.cfg.srid,))
@@ -224,18 +224,18 @@ class UrbanAtlasOSM(BaseTask):
         # 4. calculate centroids to optimize spatial join
         verbose('calculating centroids for spatial join optimization')
         sql_cent = f"""
-            update "{self.cfg.domain.case_schema}"."{self.cfg.tables.streetmaps}" 
+            update "{self.cfg.input_schema}"."{self.cfg.tables.streetmaps}" 
             set cent = st_centroid(geom)
         """
         self.execute(sql_cent)
 
         # 5. join landcover data based on centroid location
-        verbose('joining code_2018 from landcover into streetmaps')
+        verbose('joining code from landcover into streetmaps')
         sql_join = f"""
-            update "{self.cfg.domain.case_schema}"."{self.cfg.tables.streetmaps}" as s 
-            set code_2018 = (
-                select cast(code_2018 as integer) 
-                from "{self.cfg.domain.case_schema}"."{self.cfg.tables.im_landcover}" as l 
+            update "{self.cfg.input_schema}"."{self.cfg.tables.streetmaps}" as s 
+            set code = (
+                select cast(code as integer) 
+                from "{self.cfg.input_schema}"."{self.cfg.tables.im_landcover}" as l 
                 where st_intersects(l.geom, s.cent) 
                 limit 1
             )
@@ -245,7 +245,7 @@ class UrbanAtlasOSM(BaseTask):
         # 6. cleanup original import if enabled
         if self.cfg.clean_up:
             debug('deleting original import streetmap table')
-            sql_cleanup = f'drop table if exists "{self.cfg.domain.case_schema}"."{self.cfg.tables.streetmaps_or}" cascade'
+            sql_cleanup = f'drop table if exists "{self.cfg.input_schema}"."{self.cfg.tables.streetmaps_or}" cascade'
             self.execute(sql_cleanup)
 
     def merge_urban_atlas_streetmaps(self):
@@ -259,19 +259,19 @@ class UrbanAtlasOSM(BaseTask):
         # against one giant geometry is the classic PostGIS bottleneck; many small
         # pieces let the gist index restrict each difference to nearby geometry.
         sql_union = f"""
-            drop table if exists "{self.cfg.domain.case_schema}"."{joined_streetmaps}";
-            create table "{self.cfg.domain.case_schema}"."{joined_streetmaps}" as
-            select st_subdivide(st_union(geom), 128) as geom from "{self.cfg.domain.case_schema}"."{self.cfg.tables.streetmaps}"
+            drop table if exists "{self.cfg.input_schema}"."{joined_streetmaps}";
+            create table "{self.cfg.input_schema}"."{joined_streetmaps}" as
+            select st_subdivide(st_union(geom), 128) as geom from "{self.cfg.input_schema}"."{self.cfg.tables.streetmaps}"
         """
         self.execute(sql_union)
 
         # 2. update ownership and index
-        self.set_table_owner(self.cfg.domain.case_schema, joined_streetmaps)
+        self.set_table_owner(self.cfg.input_schema, joined_streetmaps)
 
         debug('adding geom index')
         sql_idx = f"""
             create index if not exists {joined_streetmaps}_geom_idx 
-            on "{self.cfg.domain.case_schema}"."{joined_streetmaps}" 
+            on "{self.cfg.input_schema}"."{joined_streetmaps}" 
             using gist(geom)
         """
         self.execute(sql_idx)
@@ -282,14 +282,14 @@ class UrbanAtlasOSM(BaseTask):
         # cheaper. `where exists` skips polygons no streetmap touches.
         progress('creating difference between landcover and unioned streetmaps')
         sql_diff = f"""
-            update "{self.cfg.domain.case_schema}"."{self.cfg.tables.im_landcover}" as l set
+            update "{self.cfg.input_schema}"."{self.cfg.tables.im_landcover}" as l set
             geom = st_difference(l.geom, (
                 select st_union(s.geom)
-                from "{self.cfg.domain.case_schema}"."{joined_streetmaps}" s
+                from "{self.cfg.input_schema}"."{joined_streetmaps}" s
                 where st_intersects(l.geom, s.geom)
             ))
             where exists (
-                select 1 from "{self.cfg.domain.case_schema}"."{joined_streetmaps}" s
+                select 1 from "{self.cfg.input_schema}"."{joined_streetmaps}" s
                 where st_intersects(l.geom, s.geom)
             )
         """
@@ -298,38 +298,38 @@ class UrbanAtlasOSM(BaseTask):
         # 4. restructure landcover columns
         verbose('restructuring landcover table columns')
         sql_alter = f"""
-            alter table "{self.cfg.domain.case_schema}"."{self.cfg.tables.im_landcover}" 
-            rename column code_2018 to code_2018_char;
+            alter table "{self.cfg.input_schema}"."{self.cfg.tables.im_landcover}" 
+            rename column code to code_char;
 
-            alter table "{self.cfg.domain.case_schema}"."{self.cfg.tables.im_landcover}" 
+            alter table "{self.cfg.input_schema}"."{self.cfg.tables.im_landcover}" 
             add column if not exists osm_id integer, 
             add column if not exists type integer, 
-            add column if not exists code_2018 integer;
+            add column if not exists code integer;
         """
         self.execute(sql_alter)
 
         # 5. cast char codes to integer
-        verbose('update code_2018 from char into integer')
+        verbose('update code from char into integer')
         sql_cast = f"""
-            update "{self.cfg.domain.case_schema}"."{self.cfg.tables.im_landcover}" set 
-            code_2018 = cast(code_2018_char as integer)
+            update "{self.cfg.input_schema}"."{self.cfg.tables.im_landcover}" set 
+            code = cast(code_char as integer)
         """
         self.execute(sql_cast)
 
         # 6. insert streetmaps into landcover
         debug('inserting streetmaps into landcover')
         sql_ins = f"""
-            insert into "{self.cfg.domain.case_schema}"."{self.cfg.tables.im_landcover}" 
-            (type, osm_id, code_2018, geom) 
-            select null, cast(osm_id as integer), code_2018, geom 
-            from "{self.cfg.domain.case_schema}"."{self.cfg.tables.streetmaps}"
+            insert into "{self.cfg.input_schema}"."{self.cfg.tables.im_landcover}" 
+            (type, osm_id, code, geom) 
+            select null, cast(osm_id as integer), code, geom 
+            from "{self.cfg.input_schema}"."{self.cfg.tables.streetmaps}"
         """
         self.execute(sql_ins)
 
         # 7. handle primary key and cleanup
         debug('finalizing table keys')
         sql_pk = f"""
-            alter table "{self.cfg.domain.case_schema}"."{self.cfg.tables.im_landcover}" 
+            alter table "{self.cfg.input_schema}"."{self.cfg.tables.im_landcover}" 
             add column if not exists lid serial primary key
         """
         self.execute(sql_pk)
@@ -337,8 +337,8 @@ class UrbanAtlasOSM(BaseTask):
         if self.cfg.clean_up:
             debug('cleaning up temporary and original tables')
             sql_cleanup = f"""
-                drop table if exists "{self.cfg.domain.case_schema}"."{joined_streetmaps}" cascade;
-                drop table if exists "{self.cfg.domain.case_schema}"."{self.cfg.tables.im_landcover_or}" cascade;
+                drop table if exists "{self.cfg.input_schema}"."{joined_streetmaps}" cascade;
+                drop table if exists "{self.cfg.input_schema}"."{self.cfg.tables.im_landcover_or}" cascade;
             """
             self.execute(sql_cleanup)
 
@@ -349,11 +349,11 @@ class UrbanAtlasOSM(BaseTask):
         # build the case statement dynamically from the configuration mapping
         case_parts = []
         for m in self.cfg.mt:
-            # m[0]: code_2018, m[1]: landcover_palm_type, m[2]: streetmap_palm_type
-            case_parts.append(f"when code_2018 = {m[0]} then case when osm_id is null then {m[1]} else {m[2]} end")
+            # m[0]: code, m[1]: landcover_palm_type, m[2]: streetmap_palm_type
+            case_parts.append(f"when code = {m[0]} then case when osm_id is null then {m[1]} else {m[2]} end")
 
         sql_palm = f"""
-            update "{self.cfg.domain.case_schema}"."{self.cfg.tables.im_landcover}" set 
+            update "{self.cfg.input_schema}"."{self.cfg.tables.im_landcover}" set 
             type = case 
                 {" ".join(case_parts)} 
                 else {self.cfg.mt_default} 

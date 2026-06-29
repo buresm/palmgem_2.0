@@ -110,6 +110,9 @@ idx:
     extras_shp: 'gid'
     centerline: 'gid'
     building_area: 'id'
+    imported_landcover: 'lid'
+    imported_streetmap: 'gid'
+    
     
 build_3d:
     bridge_width: 2.0

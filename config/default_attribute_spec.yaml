@@ -52,3 +52,11 @@ attribute_spec:
     walls:
         necessary: [wallcatd, wallcatu]
         optional:  [albedod, albedou, wallfracd, wallfracu, winfracd, winfracu]
+        
+    imported_landcover:
+        necessary: [ code ]
+        optional: [ ]
+        
+    imported_streetmap:
+        necessary: [ osm_id ]
+        optional: [ ]

@@ -19,11 +19,11 @@ class PrepareSlurbInputs(BaseTask):
         progress('creating centerline from landcover')
 
         # ensure fresh start
-        self.execute(f'drop table if exists "{self.cfg.domain.case_schema}"."{self.cfg.tables.centerline}"')
+        self.execute(f'drop table if exists "{self.cfg.input_schema}"."{self.cfg.tables.centerline}"')
 
         debug('reading landcover parcels from database')
         sql = f"""
-            select geom as geom from "{self.cfg.domain.case_schema}"."{self.cfg.tables.im_landcover}"
+            select geom as geom from "{self.cfg.input_schema}"."{self.cfg.tables.im_landcover}"
             where type = 202
         """
         parcels = pd.read_sql(sql, self.db.engine)
@@ -42,7 +42,7 @@ class PrepareSlurbInputs(BaseTask):
         gdf = gpd.GeoDataFrame(geometry=centerlines)
         gdf.to_postgis(
             name=self.cfg.tables.centerline,
-            schema=self.cfg.domain.case_schema,
+            schema=self.cfg.input_schema,
             con=self.db.engine,
             index=False
         )
@@ -52,35 +52,35 @@ class PrepareSlurbInputs(BaseTask):
 
         # simplify and merge
         sql_simplify = f"""
-            drop table if exists "{self.cfg.domain.case_schema}"."{self.cfg.tables.centerline_simplified}";
-            create table "{self.cfg.domain.case_schema}"."{self.cfg.tables.centerline_simplified}" as
+            drop table if exists "{self.cfg.input_schema}"."{self.cfg.tables.centerline_simplified}";
+            create table "{self.cfg.input_schema}"."{self.cfg.tables.centerline_simplified}" as
             select
                 geometry as geom_original,
                 st_simplify(st_linemerge(geometry), 0.5) as geom
-            from "{self.cfg.domain.case_schema}"."{self.cfg.tables.centerline}";
+            from "{self.cfg.input_schema}"."{self.cfg.tables.centerline}";
         """
         self.execute(sql_simplify)
-        self.set_table_owner(self.cfg.domain.case_schema, self.cfg.tables.centerline_simplified)
+        self.set_table_owner(self.cfg.input_schema, self.cfg.tables.centerline_simplified)
 
         # cut into segments
         debug('cutting centerline into segments')
         sql_segments = f"""
-            drop table if exists "{self.cfg.domain.case_schema}"."{self.cfg.tables.centerline_segments}";
-            create table "{self.cfg.domain.case_schema}"."{self.cfg.tables.centerline_segments}" as
-            select (st_dump(geom)).* from "{self.cfg.domain.case_schema}"."{self.cfg.tables.centerline_simplified}";
+            drop table if exists "{self.cfg.input_schema}"."{self.cfg.tables.centerline_segments}";
+            create table "{self.cfg.input_schema}"."{self.cfg.tables.centerline_segments}" as
+            select (st_dump(geom)).* from "{self.cfg.input_schema}"."{self.cfg.tables.centerline_simplified}";
         """
         self.execute(sql_segments)
-        self.set_table_owner(self.cfg.domain.case_schema, self.cfg.tables.centerline_segments)
+        self.set_table_owner(self.cfg.input_schema, self.cfg.tables.centerline_segments)
 
     def calculate_canyon_geometry(self):
         progress('calculating street canyon width and orientation')
 
         # create 'hairy' perpendicular segments
         sql_hairy = f"""
-            drop table if exists "{self.cfg.domain.case_schema}"."{self.cfg.tables.centerline_hairy}";
-            create table "{self.cfg.domain.case_schema}"."{self.cfg.tables.centerline_hairy}" as
+            drop table if exists "{self.cfg.input_schema}"."{self.cfg.tables.centerline_hairy}";
+            create table "{self.cfg.input_schema}"."{self.cfg.tables.centerline_hairy}" as
             with
-                geodata as (select row_number() over() as id, geom from "{self.cfg.domain.case_schema}"."{self.cfg.tables.centerline_segments}" where st_length(geom)>40),
+                geodata as (select row_number() over() as id, geom from "{self.cfg.input_schema}"."{self.cfg.tables.centerline_segments}" where st_length(geom)>40),
                 linecut as (select id, st_linesubstring(d.geom, substart, case when subend > 1 then 1 else subend end) geom
                             from (select id, geom, st_length(((geom)::geometry)) len, 15 sublen from geodata) as d
                                 cross join lateral (select i, (sublen * i)/len as substart, (sublen * (i+1))/len as subend
@@ -97,38 +97,38 @@ class PrepareSlurbInputs(BaseTask):
                 from (select st_startpoint(geom) as a, st_endpoint(geom) as b from bl) as sub
             ) as sub2;
 
-            create index if not exists hairy_g1_idx on "{self.cfg.domain.case_schema}"."{self.cfg.tables.centerline_hairy}" using gist(geom_1);
-            create index if not exists hairy_g2_idx on "{self.cfg.domain.case_schema}"."{self.cfg.tables.centerline_hairy}" using gist(geom_2);
-            alter table "{self.cfg.domain.case_schema}"."{self.cfg.tables.centerline_hairy}" add column if not exists gid serial;
+            create index if not exists hairy_g1_idx on "{self.cfg.input_schema}"."{self.cfg.tables.centerline_hairy}" using gist(geom_1);
+            create index if not exists hairy_g2_idx on "{self.cfg.input_schema}"."{self.cfg.tables.centerline_hairy}" using gist(geom_2);
+            alter table "{self.cfg.input_schema}"."{self.cfg.tables.centerline_hairy}" add column if not exists gid serial;
         """
         self.execute(sql_hairy)
-        self.set_table_owner(self.cfg.domain.case_schema, self.cfg.tables.centerline_hairy)
+        self.set_table_owner(self.cfg.input_schema, self.cfg.tables.centerline_hairy)
 
         # calculate intersections with buildings
         debug('finding building intersection points')
         sql_intersections = f"""
-            drop table if exists "{self.cfg.domain.case_schema}"."{self.cfg.tables.centerline_intersections}";
-            create table "{self.cfg.domain.case_schema}"."{self.cfg.tables.centerline_intersections}" as
+            drop table if exists "{self.cfg.input_schema}"."{self.cfg.tables.centerline_intersections}";
+            create table "{self.cfg.input_schema}"."{self.cfg.tables.centerline_intersections}" as
             select
                 cs.*, l_1.point_1, l_2.point_2,
                 st_distance(l_1.point_1, l_2.point_2),
                 st_collect(array[cs.geom_center, cs.geom_1, cs.geom_2, l_1.point_1, l_2.point_2]) as geom_col
-            from "{self.cfg.domain.case_schema}"."{self.cfg.tables.centerline_hairy}" cs
+            from "{self.cfg.input_schema}"."{self.cfg.tables.centerline_hairy}" cs
                 join lateral (select (st_dump(st_intersection(cs.geom_1, st_boundary(l.geom)))).geom as point_1
-                              from "{self.cfg.domain.case_schema}"."{self.cfg.tables.im_landcover}" l
+                              from "{self.cfg.input_schema}"."{self.cfg.tables.im_landcover}" l
                               where l.type between 900 and 999 and st_intersects(cs.geom_1, l.geom)
                               order by st_distance(cs.geom_center, point_1) asc limit 1) as l_1 on true
                 join lateral (select (st_dump(st_intersection(cs.geom_2, st_boundary(l.geom)))).geom as point_2
-                              from "{self.cfg.domain.case_schema}"."{self.cfg.tables.im_landcover}" l
+                              from "{self.cfg.input_schema}"."{self.cfg.tables.im_landcover}" l
                               where l.type between 900 and 999 and st_intersects(cs.geom_2, l.geom)
                               order by st_distance(cs.geom_center, point_2) asc limit 1) as l_2 on true;
         """
         self.execute(sql_intersections)
-        self.set_table_owner(self.cfg.domain.case_schema, self.cfg.tables.centerline_intersections)
+        self.set_table_owner(self.cfg.input_schema, self.cfg.tables.centerline_intersections)
 
     def calculate_centerline_results(self):
         progress('computing canyon orientation, width and building heights')
-        schema = self.cfg.domain.case_schema
+        schema = self.cfg.input_schema
 
         # pixel-centre table from buildings raster — used for height lookups here and in building front area
         debug('creating build_pixel from buildings raster')
@@ -181,7 +181,7 @@ class PrepareSlurbInputs(BaseTask):
 
     def calculate_building_front_area(self):
         progress('calculating building front areas')
-        schema = self.cfg.domain.case_schema
+        schema = self.cfg.input_schema
 
         sql_wall = f"""
             drop table if exists outer_wall_full;
@@ -256,6 +256,6 @@ class PrepareSlurbInputs(BaseTask):
     def cleanup(self):
         if self.cfg.clean_up:
             debug('cleaning up temporary spatial structures')
-            schema = self.cfg.domain.case_schema
+            schema = self.cfg.input_schema
             for table in [self.cfg.tables.centerline_hairy, self.cfg.tables.build_pixel]:
                 self.execute(f'drop table if exists "{schema}"."{table}" cascade')

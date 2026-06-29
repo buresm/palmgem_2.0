@@ -18,7 +18,7 @@ class UrbanAtlasDemBuildings(BaseTask):
         if not self.cfg._settings.get('envelope'):
             compute_envelope(
                 self.cfg, self.db,
-                schema=self.cfg.domain.case_schema,
+                schema=self.cfg.input_schema,
                 table=self.cfg.tables.im_landcover_or,
                 srid=self.cfg.srid,
             )
@@ -28,7 +28,7 @@ class UrbanAtlasDemBuildings(BaseTask):
     def run_dem(self):
         progress('Processing DEM')
 
-        schema = self.cfg.domain.case_schema
+        schema = self.cfg.input_schema
         dem_or = self.cfg.tables.dem_or
 
         # 1. Ensure the raster SRID matches dem_srid.
@@ -48,7 +48,7 @@ class UrbanAtlasDemBuildings(BaseTask):
         # 2. Clip entries outside the envelope
         debug('Delete all entries from DEM imported table that are outside envelope')
         sqltext = f"""
-            DELETE FROM "{self.cfg.domain.case_schema}"."{self.cfg.tables.dem_or}"
+            DELETE FROM "{self.cfg.input_schema}"."{self.cfg.tables.dem_or}" 
             WHERE NOT ST_Intersects(ST_Transform(%s::geometry, %s), rast)
         """
         self.execute(sqltext, (self.cfg.envelope, self.cfg.dem_srid))
@@ -73,29 +73,29 @@ class UrbanAtlasDemBuildings(BaseTask):
         debug('Create new table with transformed coordinates')
         # We use f-strings for the structural parts and %s for the values
         sqltext = f"""
-            DROP TABLE IF EXISTS "{self.cfg.domain.case_schema}"."{self.cfg.tables.dem}"; 
+            DROP TABLE IF EXISTS "{self.cfg.input_schema}"."{self.cfg.tables.dem}"; 
 
-            CREATE TABLE "{self.cfg.domain.case_schema}"."{self.cfg.tables.dem}" AS 
+            CREATE TABLE "{self.cfg.input_schema}"."{self.cfg.tables.dem}" AS 
             SELECT ROW_NUMBER() OVER(ORDER BY t.rast::geometry) AS rid, 
                    ST_Union(ST_Clip( ST_Transform( r.rast, t.rast), t.rast::geometry ), 'MAX') AS rast 
             FROM (
                 SELECT ST_Transform(ST_SetSRID(ST_Extent(rast::geometry), %s), %s) AS geom 
-                FROM "{self.cfg.domain.case_schema}"."{self.cfg.tables.dem_or}"
+                FROM "{self.cfg.input_schema}"."{self.cfg.tables.dem_or}"
             ) AS g, 
             ST_MakeEmptyCoverage(
-                tilewidth => (SELECT (ST_MetaData(rast)).width FROM "{self.cfg.domain.case_schema}"."{self.cfg.tables.dem_or}" LIMIT 1), 
-                tileheight => (SELECT (ST_MetaData(rast)).height FROM "{self.cfg.domain.case_schema}"."{self.cfg.tables.dem_or}" LIMIT 1), 
+                tilewidth => (SELECT (ST_MetaData(rast)).width FROM "{self.cfg.input_schema}"."{self.cfg.tables.dem_or}" LIMIT 1), 
+                tileheight => (SELECT (ST_MetaData(rast)).height FROM "{self.cfg.input_schema}"."{self.cfg.tables.dem_or}" LIMIT 1), 
                 width => (ST_XMax(g.geom) - ST_XMin(g.geom))::integer,
                 height => (ST_YMax(g.geom) - ST_YMin(g.geom))::integer,
                 upperleftx => ST_XMin(g.geom), 
                 upperlefty => ST_YMax(g.geom), 
-                scalex =>  (SELECT (ST_MetaData(rast)).scalex FROM "{self.cfg.domain.case_schema}"."{self.cfg.tables.dem_or}" LIMIT 1),
-                scaley => (SELECT (ST_MetaData(rast)).scaley FROM "{self.cfg.domain.case_schema}"."{self.cfg.tables.dem_or}" LIMIT 1),
-                skewx => (SELECT (ST_MetaData(rast)).skewx FROM "{self.cfg.domain.case_schema}"."{self.cfg.tables.dem_or}" LIMIT 1), 
-                skewy => (SELECT (ST_MetaData(rast)).skewy FROM "{self.cfg.domain.case_schema}"."{self.cfg.tables.dem_or}" LIMIT 1),
+                scalex =>  (SELECT (ST_MetaData(rast)).scalex FROM "{self.cfg.input_schema}"."{self.cfg.tables.dem_or}" LIMIT 1),
+                scaley => (SELECT (ST_MetaData(rast)).scaley FROM "{self.cfg.input_schema}"."{self.cfg.tables.dem_or}" LIMIT 1),
+                skewx => (SELECT (ST_MetaData(rast)).skewx FROM "{self.cfg.input_schema}"."{self.cfg.tables.dem_or}" LIMIT 1), 
+                skewy => (SELECT (ST_MetaData(rast)).skewy FROM "{self.cfg.input_schema}"."{self.cfg.tables.dem_or}" LIMIT 1),
                 srid => %s
             ) AS t(rast) 
-            INNER JOIN "{self.cfg.domain.case_schema}"."{self.cfg.tables.dem_or}" AS r 
+            INNER JOIN "{self.cfg.input_schema}"."{self.cfg.tables.dem_or}" AS r 
                 ON ST_Transform(t.rast::geometry, %s) && r.rast 
             GROUP BY t.rast;
         """
@@ -105,14 +105,14 @@ class UrbanAtlasDemBuildings(BaseTask):
 
         # 4. Finalize ownership
         self.set_table_owner(
-            schema=self.cfg.domain.case_schema,
+            schema=self.cfg.input_schema,
             table_name=self.cfg.tables.dem
         )
 
         # 5. Clean up DEM
         if self.cfg.clean_up:
             debug('Deleting original imported DEM table')
-            sqltext = f'DROP TABLE "{self.cfg.domain.case_schema}"."{self.cfg.tables.dem_or}" CASCADE;'
+            sqltext = f'DROP TABLE "{self.cfg.input_schema}"."{self.cfg.tables.dem_or}" CASCADE;'
             self.execute(sqltext)
 
     def run_buildings(self):
@@ -128,7 +128,7 @@ class UrbanAtlasDemBuildings(BaseTask):
                 WHERE table_schema = %s AND table_name = %s
             )
         """
-        res = self.execute(check_sql, (self.cfg.domain.case_schema, self.cfg.tables.buildings_or))
+        res = self.execute(check_sql, (self.cfg.input_schema, self.cfg.tables.buildings_or))
         rel_exists = res[0][0] if res else False
 
         if rel_exists:
@@ -138,29 +138,29 @@ class UrbanAtlasDemBuildings(BaseTask):
             debug('Create new table with transformed coordinates')
             # identifiers use f-strings; values use %s
             sql_transform = f"""
-                DROP TABLE IF EXISTS "{self.cfg.domain.case_schema}"."{self.cfg.tables.buildings}" CASCADE; 
+                DROP TABLE IF EXISTS "{self.cfg.input_schema}"."{self.cfg.tables.buildings}" CASCADE; 
 
-                CREATE TABLE "{self.cfg.domain.case_schema}"."{self.cfg.tables.buildings}" AS 
+                CREATE TABLE "{self.cfg.input_schema}"."{self.cfg.tables.buildings}" AS 
                 SELECT ROW_NUMBER() OVER(ORDER BY t.rast::geometry) AS rid, 
                        ST_Union(ST_Clip( ST_Transform( r.rast, t.rast), t.rast::geometry ), 'MAX') AS rast 
                 FROM (
                     SELECT ST_Transform(ST_SetSRID(ST_Extent(rast::geometry), %s), %s) AS geom 
-                    FROM "{self.cfg.domain.case_schema}"."{self.cfg.tables.buildings_or}"
+                    FROM "{self.cfg.input_schema}"."{self.cfg.tables.buildings_or}"
                 ) AS g, 
                 ST_MakeEmptyCoverage(
-                    tilewidth => (SELECT (ST_MetaData(rast)).width FROM "{self.cfg.domain.case_schema}"."{self.cfg.tables.buildings_or}" LIMIT 1), 
-                    tileheight => (SELECT (ST_MetaData(rast)).height FROM "{self.cfg.domain.case_schema}"."{self.cfg.tables.buildings_or}" LIMIT 1), 
+                    tilewidth => (SELECT (ST_MetaData(rast)).width FROM "{self.cfg.input_schema}"."{self.cfg.tables.buildings_or}" LIMIT 1), 
+                    tileheight => (SELECT (ST_MetaData(rast)).height FROM "{self.cfg.input_schema}"."{self.cfg.tables.buildings_or}" LIMIT 1), 
                     width => (ST_XMax(g.geom) - ST_XMin(g.geom))::integer,
                     height => (ST_YMax(g.geom) - ST_YMin(g.geom))::integer,
                     upperleftx => ST_XMin(g.geom), 
                     upperlefty => ST_YMax(g.geom), 
-                    scalex => (SELECT (ST_MetaData(rast)).scalex FROM "{self.cfg.domain.case_schema}"."{self.cfg.tables.buildings_or}" LIMIT 1),
-                    scaley => (SELECT (ST_MetaData(rast)).scaley FROM "{self.cfg.domain.case_schema}"."{self.cfg.tables.buildings_or}" LIMIT 1),
-                    skewx => (SELECT (ST_MetaData(rast)).skewx FROM "{self.cfg.domain.case_schema}"."{self.cfg.tables.buildings_or}" LIMIT 1), 
-                    skewy => (SELECT (ST_MetaData(rast)).skewy FROM "{self.cfg.domain.case_schema}"."{self.cfg.tables.buildings_or}" LIMIT 1),
+                    scalex => (SELECT (ST_MetaData(rast)).scalex FROM "{self.cfg.input_schema}"."{self.cfg.tables.buildings_or}" LIMIT 1),
+                    scaley => (SELECT (ST_MetaData(rast)).scaley FROM "{self.cfg.input_schema}"."{self.cfg.tables.buildings_or}" LIMIT 1),
+                    skewx => (SELECT (ST_MetaData(rast)).skewx FROM "{self.cfg.input_schema}"."{self.cfg.tables.buildings_or}" LIMIT 1), 
+                    skewy => (SELECT (ST_MetaData(rast)).skewy FROM "{self.cfg.input_schema}"."{self.cfg.tables.buildings_or}" LIMIT 1),
                     srid => %s
                 ) AS t(rast) 
-                INNER JOIN "{self.cfg.domain.case_schema}"."{self.cfg.tables.buildings_or}" AS r 
+                INNER JOIN "{self.cfg.input_schema}"."{self.cfg.tables.buildings_or}" AS r 
                     ON ST_Transform(t.rast::geometry, %s) && r.rast 
                 GROUP BY t.rast;
             """
@@ -168,20 +168,20 @@ class UrbanAtlasDemBuildings(BaseTask):
             self.execute(sql_transform, params)
 
             # 2. Change Ownership (using the helper method)
-            self.set_table_owner(self.cfg.domain.case_schema, self.cfg.tables.buildings)
+            self.set_table_owner(self.cfg.input_schema, self.cfg.tables.buildings)
 
             # 3. Handle rid index
             debug('Adding serial rid index')
             sql_rid = f"""
-                ALTER TABLE "{self.cfg.domain.case_schema}"."{self.cfg.tables.buildings}" DROP COLUMN IF EXISTS rid; 
-                ALTER TABLE "{self.cfg.domain.case_schema}"."{self.cfg.tables.buildings}" ADD COLUMN rid SERIAL;
+                ALTER TABLE "{self.cfg.input_schema}"."{self.cfg.tables.buildings}" DROP COLUMN IF EXISTS rid; 
+                ALTER TABLE "{self.cfg.input_schema}"."{self.cfg.tables.buildings}" ADD COLUMN rid SERIAL;
             """
             self.execute(sql_rid)
 
             # 4. Cleanup
             if self.cfg.get('clean_up', False):
                 debug('Cleaning up imported buildings DEM')
-                sql_cleanup = f'DROP TABLE "{self.cfg.domain.case_schema}"."{self.cfg.tables.buildings_or}" CASCADE;'
+                sql_cleanup = f'DROP TABLE "{self.cfg.input_schema}"."{self.cfg.tables.buildings_or}" CASCADE;'
                 self.execute(sql_cleanup)
         else:
             verbose('no buildings raster in case schema; skipping building DEM processing')
