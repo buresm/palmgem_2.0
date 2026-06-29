@@ -1,17 +1,62 @@
-pg_user: 'pg_user'
-pg_password: 'pg_password'
-database: 'database_name'
-pg_owner: 'owner_name'
+# Copyright 2018-2024 Institute of Computer Science of the Czech Academy of
+# Sciences, Prague, Czech Republic. Authors: Martin Bures, Jaroslav Resler.
+#
+# This file is part of PALM-GeM.
+#
+# PALM-GeM is free software: you can redistribute it and/or modify it under the
+# terms of the GNU General Public License as published by the Free Software
+# Foundation, either version 3 of the License, or (at your option) any later
+# version.
+#
+# PALM-GeM is distributed in the hope that it will be useful, but WITHOUT ANY
+# WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR
+# A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License along with
+# PALM-GeM. If not, see <https://www.gnu.org/licenses/>.
 
-visual_check:
-    enabled: True
-    show_plots: False
+# ===========================================================================
+# Prague city-centre LOD2 example.
+#
+# A small (500 x 400 m, 1 m) detailed urban domain with 3D buildings, vertical
+# walls, roofs and individual trees. Run from the repository root with:
+#
+#     python main.py -c ../examples/prague_lod2/prague_lod2.yaml
+#
+# The -c path is resolved relative to the config/ directory, so the ../ steps
+# back out to the example. All data lives in examples/prague_lod2/files/ and is
+# already projected to EPSG:32633 (UTM 33N). Edit the database block below and
+# the executable paths at the bottom to match your machine.
+# ===========================================================================
+
+# --- PostgreSQL / PostGIS connection (EDIT THESE) --------------------------
+database:
+  user:     'postgres'
+  password: 'postgres'
+  database: 'palm_static'
+  host:     'localhost'
+  port:     5432
+
+pg_owner: 'postgres'
+
+# --- Pipeline --------------------------------------------------------------
+# Import the GIS sources, build the domain (LOD2 is auto-enabled because
+# roofs/walls + a landcover catland column + surface_params are present), grid
+# the trees into leaf-area density, then write the static driver NetCDF.
+run_tasks:
+  - gis_import
+  - setup
+  - initialize_domain
+  - lad
+  - static_driver
+  - finalize
 
 input_schema: 'inputs_prague_lod2'
 
+# --- Domain ----------------------------------------------------------------
 domain:
     name: 'prague'
-    scenario: 'lod2'
+    scenario: 'lod2'          # -> case_schema "prague_lod2", output/prague_lod2_static.nc
     parent_domain_schema: ''
     dx: 1.0
     dy: 1.0
@@ -20,16 +65,103 @@ domain:
     ny: 400
     cent_x: 460198.0
     cent_y: 5546223.0
-    
+
 origin_time: '2024-01-01 00:00:00'
 
+# All example data (vectors and rasters) is in EPSG:32633, including the DEM,
+# so override the EU-DEM default (dem_srid: 3035).
+srid: 32633
+srid_palm: 32633
+srid_input: 32633
+dem_srid: 32633
+
 logs:
-    level: 1
-    
-# assign water body temperature according to landcover type
-water_pars_temp:   # thermodynamic temperature
-    1: 275.65 # Shore, lakes
-    2: 275.65 # River
-    3: 275.65 # Open sea
-    4: 275.65 # Pond
-    5: 275.65 # Fountain
+    level: 25                 # PROGRESS. Lower to 15 (VERBOSE) or 10 (DEBUG) for more detail.
+
+visual_check:
+    enabled: True
+    show_plots: False
+
+# --- GIS sources to import (paths are relative to the repository root) ------
+data_imports:
+  vectors:
+    landcover:
+      path: examples/prague_lod2/files/landcover.shp
+      table: landcover
+      srid: 32633
+    roofs:
+      path: examples/prague_lod2/files/roofs.shp
+      table: roofs
+      srid: 32633
+    walls:
+      path: examples/prague_lod2/files/walls.shp
+      table: walls
+      srid: 32633
+    trees:
+      path: examples/prague_lod2/files/trees.shp
+      table: trees
+      srid: 32633
+    extras_shp:
+      path: examples/prague_lod2/files/extras_shp.shp
+      table: extras_shp
+      srid: 32633
+
+  rasters:
+    dem:
+      path: examples/prague_lod2/files/dem.tif
+      table: dem
+      srid: 32633
+    buildings:
+      path: examples/prague_lod2/files/buildings.tif
+      table: buildings           # -> tables.buildings_height
+      srid: 32633
+    extras:
+      path: examples/prague_lod2/files/extras.tif
+      table: extras
+      srid: 32633
+
+# --- Attribute-name mapping (standard_name: name_in_this_dataset) ----------
+# The Prague source files use legacy (Czech) column names; map them to the
+# standard names PALM-GeM expects. See docs/configuration_docs.md (Attribute
+# mapping) and config/default_attribute_mapping.yaml.
+attribute_mapping:
+    landcover:
+        catland:   katland         # surface_params code index (LOD2)
+    walls:
+        wallcatd:  stenakatd        # surface_params code, lower wall levels
+        wallcatu:  stenakath        # surface_params code, upper wall levels
+        albedou:   albedoh
+        winfracu:  winfrach
+        wallfracu: wallfrach
+    roofs:
+        thickness: tloustka         # roof layer thickness
+    trees:
+        treeh:     vysstr           # tree height (necessary)
+        trunkh:    vyskmen
+        trunkr:    polokmen
+        crownr:    polokor
+        crownshp:  tvarkor
+        tree_type: typstr
+
+# Surface physical parameters (LOD2) are shipped with PALM-GeM as
+# config/surface_params.csv and built automatically by initialize_domain; the
+# identical table also lives in examples/prague_lod2/files/surface_params.csv
+# for reference. Override with `surface_params_file: <path>` if you customise it.
+
+# Assign water-body thermodynamic temperature by landcover water type.
+water_pars_temp:
+    1: 275.65   # Shore, lakes
+    2: 275.65   # River
+    3: 275.65   # Open sea
+    4: 275.65   # Pond
+    5: 275.65   # Fountain
+
+# --- External executables --------------------------------------------------
+# Defaults assume these are on your PATH (typical on Linux / via Docker DB +
+# host GDAL). On Windows set full paths, e.g.:
+#   ogr2ogr_path: C:\Users\you\AppData\Local\Programs\OSGeo4W\bin\ogr2ogr.exe
+#   psql_path: C:\Program Files\PostgreSQL\16\bin\psql.exe
+#   raster2psql_path: C:\Program Files\PostgreSQL\16\bin\raster2pgsql.exe
+ogr2ogr_path: ogr2ogr
+psql_path: psql
+raster2psql_path: raster2pgsql

@@ -28,24 +28,46 @@ class UrbanAtlasDemBuildings(BaseTask):
     def run_dem(self):
         progress('Processing DEM')
 
-        # 1. Update Raster SRID
-        debug('Updating DEM raster with SRID')
-        sqltext = f"SELECT UpdateRasterSRID(%s, %s, %s, %s)"
-        params = (
-            self.cfg.domain.case_schema,
-            self.cfg.tables.dem_or,
-            'rast',
-            self.cfg.dem_srid
-        )
-        self.execute(sqltext, params)
+        schema = self.cfg.domain.case_schema
+        dem_or = self.cfg.tables.dem_or
+
+        # 1. Ensure the raster SRID matches dem_srid.
+        # UpdateRasterSRID drops and rebuilds the raster constraints; when the
+        # SRID is already set (e.g. raster2pgsql ran with -s/-C) there is nothing
+        # to drop and PostGIS raises "None of the constraints specified could be
+        # dropped". Skip the update when the SRID is already correct.
+        current_srid = self.fetchone(
+            f'SELECT ST_SRID(rast) FROM "{schema}"."{dem_or}" LIMIT 1')
+        if current_srid == self.cfg.dem_srid:
+            debug(f'DEM raster SRID already {self.cfg.dem_srid}; skipping UpdateRasterSRID')
+        else:
+            debug(f'updating DEM raster SRID {current_srid} -> {self.cfg.dem_srid}')
+            self.execute("SELECT UpdateRasterSRID(%s, %s, %s, %s)",
+                         (schema, dem_or, 'rast', self.cfg.dem_srid))
 
         # 2. Clip entries outside the envelope
         debug('Delete all entries from DEM imported table that are outside envelope')
         sqltext = f"""
-            DELETE FROM "{self.cfg.domain.case_schema}"."{self.cfg.tables.dem_or}" 
+            DELETE FROM "{self.cfg.domain.case_schema}"."{self.cfg.tables.dem_or}"
             WHERE NOT ST_Intersects(ST_Transform(%s::geometry, %s), rast)
         """
         self.execute(sqltext, (self.cfg.envelope, self.cfg.dem_srid))
+
+        # guard: if the clip removed every tile (the DEM does not overlap the
+        # domain) the table is now empty, and ST_Extent/ST_MetaData below return
+        # NULL — which surfaces deep inside ST_MakeEmptyCoverage as the opaque
+        # "upper bound of FOR loop cannot be null". Fail with an actionable
+        # message instead.
+        remaining = self.fetchone(
+            f'SELECT count(*) FROM "{schema}"."{dem_or}"')
+        if not remaining:
+            raise RuntimeError(
+                f'no DEM tiles remain in "{schema}"."{dem_or}" after the envelope '
+                f'clip: the DEM does not overlap the domain. Check that dem_srid '
+                f'({self.cfg.dem_srid}) matches the DEM, that srid ({self.cfg.srid}) '
+                f'and the domain centre/extent are correct, and that the DEM covers '
+                f'the domain.')
+        debug(f'{remaining} DEM tile(s) intersect the domain envelope')
 
         # 3. Transform coordinates and create new DEM table
         debug('Create new table with transformed coordinates')
