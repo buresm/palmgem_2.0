@@ -39,7 +39,7 @@ class ShapefileImporter:
             "-nlt", "PROMOTE_TO_MULTI",
             "-t_srs", f"EPSG:{srid}",
             "-lco", "GEOMETRY_NAME=geom",
-            "-lco", "PRECISION=NO"
+            "-lco", "PRECISION=NO",
             "-lco", f"FID={idx}",
         ]
 
