@@ -23,15 +23,20 @@ class GisImporter(BaseTask):
 
         # 2. Process all Vectors
         vectors = dict(self.cfg.data_imports.vectors._settings)
+        rasters = dict(self.cfg.data_imports.rasters._settings)
+        progress("importing {} vector(s) and {} raster(s) into schema '{}'",
+                 len(vectors), len(rasters), self.cfg.input_schema)
+
         for vec in vectors:
-            debug(f'Creating vector {vec}')
             path = self.cfg.data_imports.vectors[vec]['path']
             table = self.cfg.data_imports.vectors[vec]['table']
             srid = self.cfg.data_imports.vectors[vec]['srid']
             ogr2ogr_exe = self.cfg.ogr2ogr_path
             if not os.path.exists(path):
-                warning(f"File not found: path={path}")
+                warning(f"vector '{vec}' source not found, skipping: {path}")
                 continue
+            progress("importing vector '{}' -> {}.{}", vec, self.cfg.input_schema, table)
+            debug(f"source {path} (srid {srid})")
             try:
                 shp_tool.import_shp(
                     file_path=path,
@@ -50,18 +55,17 @@ class GisImporter(BaseTask):
             self._verify_imported(self.cfg.input_schema, table)
 
         # 3. Process all Rasters
-        rasters = dict(self.cfg.data_imports.rasters._settings)
         for rast in rasters:
-            debug(f'Creating raster {rast}')
             path = self.cfg.data_imports.rasters[rast]['path']
             table = self.cfg.data_imports.rasters[rast]['table']
             srid = self.cfg.data_imports.rasters[rast]['srid']
             psql = self.cfg.psql_path
             raster2psql = self.cfg.raster2psql_path
             if not os.path.exists(path):
-                warning(f"File not found: {path}")
+                warning(f"raster '{rast}' source not found, skipping: {path}")
                 continue
-            debug(f"Importing raster: {path}")
+            progress("importing raster '{}' -> {}.{}", rast, self.cfg.input_schema, table)
+            debug(f"source {path} (srid {srid})")
             try:
                 rast_tool.import_tiff(
                     file_path=path,
@@ -77,7 +81,7 @@ class GisImporter(BaseTask):
                 warning(f"raster import reported an issue for '{table}': {e}")
             self._verify_imported(self.cfg.input_schema, table)
 
-        debug("Geospatial data ingestion complete.")
+        progress("gis import complete")
 
     def _verify_imported(self, schema, table):
         """Confirm a table was actually created and populated in PostgreSQL.

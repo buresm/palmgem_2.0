@@ -7,7 +7,12 @@ import time
 import pandas as pd
 from sqlalchemy import create_engine
 from sqlalchemy.engine import URL
-from src.logger import error, verbose, warning, progress, sql_debug, sql_verbose, debug
+from src.logger import error, verbose, warning, progress, sql_debug, sql_verbose, debug, extra_verbose
+
+
+def _sql_trace(query):
+    """Collapse a SQL string to one compact line for EXTRA_VERBOSE tracing."""
+    return ' '.join(str(query).split())
 
 
 class Database:
@@ -43,8 +48,11 @@ class Database:
                 return
             except Exception as e:
                 if i < retries - 1:
+                    warning("database connection attempt {}/{} failed ({}); retrying in {}s",
+                            i + 1, retries, e, delay)
                     time.sleep(delay)
                 else:
+                    error("database connection failed after {} attempts", retries)
                     raise e
 
     def execute(self, query, params=None, fetch=True):
@@ -61,6 +69,7 @@ class Database:
 
         with self.conn.cursor() as cur:
             try:
+                extra_verbose("execute: {}", _sql_trace(query))
                 cur.execute(query, params)
 
                 # Capture RAISE NOTICE logs
@@ -89,6 +98,7 @@ class Database:
 
         with self.conn.cursor() as cur:
             try:
+                extra_verbose("fetch: {}", _sql_trace(query))
                 cur.execute(query, params)
                 sql_debug(self.conn)
                 if cur.description:
@@ -109,6 +119,7 @@ class Database:
 
         with self.conn.cursor() as cur:
             try:
+                extra_verbose("fetchone: {}", _sql_trace(query))
                 cur.execute(query, params)
                 sql_debug(self.conn)
                 if cur.description:

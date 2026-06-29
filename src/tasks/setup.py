@@ -51,7 +51,10 @@ class SetupTask(BaseTask):
 
         debug(f'domain origin lon,lat: {origin_lon}, {origin_lat}')
 
-        debug(f'domain: {self.cfg.domain.name} (scenario: {self.cfg.domain.scenario})')
+        progress("domain '{}' (scenario: '{}'): {}x{} cells @ {} m resolution, center ({}, {})",
+                 self.cfg.domain.name, self.cfg.domain.scenario,
+                 self.cfg.domain.nx, self.cfg.domain.ny, self.cfg.domain.dx,
+                 self.cfg.domain.cent_x, self.cfg.domain.cent_y)
         debug(f'resolution (dx,dy,dz): ({self.cfg.domain.dx}, {self.cfg.domain.dy}, {self.cfg.domain.dz})')
         debug(f'origin coordinates (x,y): ({origin_x}, {origin_y})')
 

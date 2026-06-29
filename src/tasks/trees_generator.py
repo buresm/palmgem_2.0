@@ -20,7 +20,7 @@ class LadGenerator(BaseTask):
         processes individual tree point data into a 3d gridded structure,
         generating vertical layers for leaf area density (lad) and basal area density (bad).
         """
-        debug('processing 3d gridded structure of the trees')
+        progress('generating leaf area density (LAD) grid from tree points')
 
         # 1. create the trees_grid table based on the horizontal grid structure
         debug('creating new table trees_grid')
@@ -44,7 +44,7 @@ class LadGenerator(BaseTask):
 
         # calculate number of vertical layers based on grid spacing (dz)
         nzlad = ceil(thm / self.cfg.domain.dz) + 1
-        debug(f'total vertical canopy layers (nzlad): {nzlad}')
+        verbose(f'max tree height {thm} m -> {nzlad} vertical canopy layers (nzlad)')
 
         # 4. dynamically add lad and bad columns for each vertical level
         # keywords and types are strictly lower case
@@ -59,7 +59,7 @@ class LadGenerator(BaseTask):
             self.execute(sql_alter)
 
         # 5. call the stored procedure to distribute tree properties into the grid
-        debug('executing palm_tree_grid routine for volumetric distribution')
+        progress('distributing tree properties into the 3d grid (palm_tree_grid)')
         sql_proc = "select palm_tree_grid(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
         params = (
             self.cfg.domain.case_schema,
@@ -82,6 +82,7 @@ class LadGenerator(BaseTask):
         sql_owner = f'alter table "{self.cfg.domain.case_schema}"."{self.cfg.tables.trees_grid}" owner to {self.cfg.pg_owner}'
         self.execute(sql_owner)
 
+        progress('LAD grid complete ({} vertical layers)', nzlad)
         return True
 
 
@@ -109,6 +110,7 @@ class LaiGenerator(BaseTask):
         processes canopy data by intersecting the grid with lai and canopy height rasters,
         storing the result in the main grid table.
         """
+        progress('processing LAI and canopy height onto the grid')
         debug('adding lai and canopy height columns into grid table')
         sql_init = f"""
             alter table "{self.cfg.domain.case_schema}"."{self.cfg.tables.grid}"
@@ -166,4 +168,5 @@ class LaiGenerator(BaseTask):
         """
         self.execute(sql_ch, (self.cfg.canopy.canopy_height_mod,))
 
+        progress('LAI / canopy height processing complete')
         return True

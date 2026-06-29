@@ -161,3 +161,5 @@ class UrbanAtlasDemBuildings(BaseTask):
                 debug('Cleaning up imported buildings DEM')
                 sql_cleanup = f'DROP TABLE "{self.cfg.domain.case_schema}"."{self.cfg.tables.buildings_or}" CASCADE;'
                 self.execute(sql_cleanup)
+        else:
+            verbose('no buildings raster in case schema; skipping building DEM processing')
