@@ -69,39 +69,23 @@ class UrbanAtlasDemBuildings(BaseTask):
                 f'the domain.')
         debug(f'{remaining} DEM tile(s) intersect the domain envelope')
 
-        # 3. Transform coordinates and create new DEM table
-        debug('Create new table with transformed coordinates')
-        # We use f-strings for the structural parts and %s for the values
+        # 3. Mosaic the in-domain source tiles into one continuous raster, then
+        # reproject once. The previous approach reprojected each source tile
+        # independently and re-tiled it via ST_MakeEmptyCoverage, which left thin
+        # NODATA seams (regular horizontal/vertical missing lines) at every tile
+        # boundary: edge resampling needs the neighbouring tile's pixels, which
+        # were not part of the per-tile join. raster2pgsql tiles are adjacent and
+        # non-overlapping, so ST_Union stitches them seamlessly before transform.
+        debug('Create new DEM table (mosaic source tiles, then reproject once)')
         sqltext = f"""
-            DROP TABLE IF EXISTS "{self.cfg.input_schema}"."{self.cfg.tables.dem}"; 
+            DROP TABLE IF EXISTS "{schema}"."{self.cfg.tables.dem}";
 
-            CREATE TABLE "{self.cfg.input_schema}"."{self.cfg.tables.dem}" AS 
-            SELECT ROW_NUMBER() OVER(ORDER BY t.rast::geometry) AS rid, 
-                   ST_Union(ST_Clip( ST_Transform( r.rast, t.rast), t.rast::geometry ), 'MAX') AS rast 
-            FROM (
-                SELECT ST_Transform(ST_SetSRID(ST_Extent(rast::geometry), %s), %s) AS geom 
-                FROM "{self.cfg.input_schema}"."{self.cfg.tables.dem_or}"
-            ) AS g, 
-            ST_MakeEmptyCoverage(
-                tilewidth => (SELECT (ST_MetaData(rast)).width FROM "{self.cfg.input_schema}"."{self.cfg.tables.dem_or}" LIMIT 1), 
-                tileheight => (SELECT (ST_MetaData(rast)).height FROM "{self.cfg.input_schema}"."{self.cfg.tables.dem_or}" LIMIT 1), 
-                width => (ST_XMax(g.geom) - ST_XMin(g.geom))::integer,
-                height => (ST_YMax(g.geom) - ST_YMin(g.geom))::integer,
-                upperleftx => ST_XMin(g.geom), 
-                upperlefty => ST_YMax(g.geom), 
-                scalex =>  (SELECT (ST_MetaData(rast)).scalex FROM "{self.cfg.input_schema}"."{self.cfg.tables.dem_or}" LIMIT 1),
-                scaley => (SELECT (ST_MetaData(rast)).scaley FROM "{self.cfg.input_schema}"."{self.cfg.tables.dem_or}" LIMIT 1),
-                skewx => (SELECT (ST_MetaData(rast)).skewx FROM "{self.cfg.input_schema}"."{self.cfg.tables.dem_or}" LIMIT 1), 
-                skewy => (SELECT (ST_MetaData(rast)).skewy FROM "{self.cfg.input_schema}"."{self.cfg.tables.dem_or}" LIMIT 1),
-                srid => %s
-            ) AS t(rast) 
-            INNER JOIN "{self.cfg.input_schema}"."{self.cfg.tables.dem_or}" AS r 
-                ON ST_Transform(t.rast::geometry, %s) && r.rast 
-            GROUP BY t.rast;
+            CREATE TABLE "{schema}"."{self.cfg.tables.dem}" AS
+            SELECT 1 AS rid,
+                   ST_Transform(ST_Union(rast), %s) AS rast
+            FROM "{schema}"."{dem_or}";
         """
-
-        params = (self.cfg.dem_srid, self.cfg.srid, self.cfg.srid, self.cfg.dem_srid)
-        self.execute(sqltext, params)
+        self.execute(sqltext, (self.cfg.srid,))
 
         # 4. Finalize ownership
         self.set_table_owner(
@@ -134,38 +118,20 @@ class UrbanAtlasDemBuildings(BaseTask):
         if rel_exists:
             progress('Processing buildings DEM')
 
-            # 1. Create transformed table
-            debug('Create new table with transformed coordinates')
-            # identifiers use f-strings; values use %s
+            # 1. Mosaic the source tiles into one continuous raster, then
+            # reproject once. Per-tile reproject + retile (the old
+            # ST_MakeEmptyCoverage approach) left NODATA seams at tile boundaries;
+            # see run_dem for the full explanation.
+            debug('Create new buildings table (mosaic source tiles, then reproject once)')
             sql_transform = f"""
-                DROP TABLE IF EXISTS "{self.cfg.input_schema}"."{self.cfg.tables.buildings}" CASCADE; 
+                DROP TABLE IF EXISTS "{self.cfg.input_schema}"."{self.cfg.tables.buildings}" CASCADE;
 
-                CREATE TABLE "{self.cfg.input_schema}"."{self.cfg.tables.buildings}" AS 
-                SELECT ROW_NUMBER() OVER(ORDER BY t.rast::geometry) AS rid, 
-                       ST_Union(ST_Clip( ST_Transform( r.rast, t.rast), t.rast::geometry ), 'MAX') AS rast 
-                FROM (
-                    SELECT ST_Transform(ST_SetSRID(ST_Extent(rast::geometry), %s), %s) AS geom 
-                    FROM "{self.cfg.input_schema}"."{self.cfg.tables.buildings_or}"
-                ) AS g, 
-                ST_MakeEmptyCoverage(
-                    tilewidth => (SELECT (ST_MetaData(rast)).width FROM "{self.cfg.input_schema}"."{self.cfg.tables.buildings_or}" LIMIT 1), 
-                    tileheight => (SELECT (ST_MetaData(rast)).height FROM "{self.cfg.input_schema}"."{self.cfg.tables.buildings_or}" LIMIT 1), 
-                    width => (ST_XMax(g.geom) - ST_XMin(g.geom))::integer,
-                    height => (ST_YMax(g.geom) - ST_YMin(g.geom))::integer,
-                    upperleftx => ST_XMin(g.geom), 
-                    upperlefty => ST_YMax(g.geom), 
-                    scalex => (SELECT (ST_MetaData(rast)).scalex FROM "{self.cfg.input_schema}"."{self.cfg.tables.buildings_or}" LIMIT 1),
-                    scaley => (SELECT (ST_MetaData(rast)).scaley FROM "{self.cfg.input_schema}"."{self.cfg.tables.buildings_or}" LIMIT 1),
-                    skewx => (SELECT (ST_MetaData(rast)).skewx FROM "{self.cfg.input_schema}"."{self.cfg.tables.buildings_or}" LIMIT 1), 
-                    skewy => (SELECT (ST_MetaData(rast)).skewy FROM "{self.cfg.input_schema}"."{self.cfg.tables.buildings_or}" LIMIT 1),
-                    srid => %s
-                ) AS t(rast) 
-                INNER JOIN "{self.cfg.input_schema}"."{self.cfg.tables.buildings_or}" AS r 
-                    ON ST_Transform(t.rast::geometry, %s) && r.rast 
-                GROUP BY t.rast;
+                CREATE TABLE "{self.cfg.input_schema}"."{self.cfg.tables.buildings}" AS
+                SELECT 1 AS rid,
+                       ST_Transform(ST_Union(rast), %s) AS rast
+                FROM "{self.cfg.input_schema}"."{self.cfg.tables.buildings_or}";
             """
-            params = (self.cfg.dem_srid, self.cfg.srid, self.cfg.srid, self.cfg.dem_srid)
-            self.execute(sql_transform, params)
+            self.execute(sql_transform, (self.cfg.srid,))
 
             # 2. Change Ownership (using the helper method)
             self.set_table_owner(self.cfg.input_schema, self.cfg.tables.buildings)
