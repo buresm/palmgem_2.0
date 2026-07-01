@@ -38,8 +38,8 @@
 attribute_spec:
 
     landcover:
-        necessary: [catland]
-        optional:  [catlandd, catlandu]
+        necessary: []
+        optional:  [catland, catlandd, catlandu]
 
     roofs:
         necessary: []

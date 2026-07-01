@@ -2065,7 +2065,7 @@ class SlurbDriverGen(StaticDriverGen):
                 select g.id as gid, sum(st_area(st_intersection(g.geom, l.geom))) / {area_factor} as sum_area 
                 from "{schema}"."{self.cfg.tables.grid_slurb}" g
                 join "{schema}"."{self.cfg.tables.landcover}" l on st_intersects(l.geom, g.geom) 
-                where l.type between 900 and 999 
+                where l.type between {self.cfg.type_range.building_min} and {self.cfg.type_range.building_max}
                 group by g.id
             ) as s where g.id = s.gid;
 
@@ -2075,7 +2075,7 @@ class SlurbDriverGen(StaticDriverGen):
                 select g.id as gid, sum(st_area(st_intersection(g.geom, l.geom))) / {area_factor} as sum_area 
                 from "{schema}"."{self.cfg.tables.grid_slurb}" g
                 join "{schema}"."{self.cfg.tables.landcover}" l on st_intersects(l.geom, g.geom) 
-                where l.type between 900 and 999 or l.type between 200 and 299
+                where l.type between {self.cfg.type_range.building_min} and {self.cfg.type_range.building_max} or l.type between {self.cfg.type_range.pavement_min} and {self.cfg.type_range.pavement_max}
                 group by g.id
             ) as s where g.id = s.gid;
         """

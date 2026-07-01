@@ -500,10 +500,26 @@ class InitializeDomainTask(BaseTask):
             self.execute(f'drop table if exists "{self.cfg.domain.case_schema}"."{self.cfg.tables.extras}"')
 
         # 8. validate canopy/lai requirements
+        # canopy.using_lai needs BOTH the lai and canopy_height rasters present in
+        # the case schema AND non-empty (a raster can be copied but end up empty
+        # when it does not overlap the domain). If either is missing or empty,
+        # warn and fall back (disable using_lai) rather than letting the lai task
+        # run against absent/empty rasters.
         if self.cfg.canopy.using_lai:
-            debug('validating lai canopy inputs')
-            if self.cfg.tables.lai not in self.cfg.rtabs or self.cfg.tables.canopy_height not in self.cfg.rtabs:
-                warning('lai or canopy_height missing in inputs; disabling canopy.using_lai')
+            debug('validating lai/canopy_height inputs for canopy.using_lai')
+            missing = []
+            for tbl in (self.cfg.tables.lai, self.cfg.tables.canopy_height):
+                if tbl not in self.cfg.rtabs:
+                    missing.append(f'{tbl} (not imported)')
+                    continue
+                n_rows = self.fetchone(
+                    f'select count(*) from "{self.cfg.domain.case_schema}"."{tbl}"')
+                if not n_rows:
+                    missing.append(f'{tbl} (empty / no domain overlap)')
+            if missing:
+                warning('canopy.using_lai is True but required raster(s) unavailable: '
+                        '{}; disabling canopy.using_lai (LAD will use point tree data '
+                        'if the lad task runs)', '; '.join(missing))
                 self.cfg.canopy.update_setting('using_lai', False)
 
         # 9. check compatibility between surface fractions and lod2
@@ -1042,7 +1058,7 @@ class InitializeDomainTask(BaseTask):
             sql_slurb = f"""
                 update "{self.cfg.domain.case_schema}"."{self.cfg.tables.landcover}" 
                 set type = 101 
-                where type < 900
+                where type < {self.cfg.type_range.building_min}
             """
             self.execute(sql_slurb)
 
@@ -1224,11 +1240,11 @@ class InitializeDomainTask(BaseTask):
                 where (
                     select count(*) 
                     from "{self.cfg.domain.case_schema}"."{self.cfg.tables.landcover}" as nb 
-                    where nb.type between 0 and 899 
+                    where nb.type between 0 and {self.cfg.type_range.building_min - 1} 
                         and st_touches(st_buffer(nb.geom, 0.00001), l.geom) 
                         and nb.lid != l.lid
                 ) = 0 
-                and l.type between 0 and 899
+                and l.type between 0 and {self.cfg.type_range.building_min - 1}
             )
             select g.lid 
             from "{self.cfg.domain.case_schema}"."{self.cfg.tables.grid}" as g
@@ -1297,7 +1313,7 @@ class InitializeDomainTask(BaseTask):
                 create temp table temp_c_lids as 
                 select 
                     l.lid as llid,
-                    count(*) filter(where ln.type between 900 and 999) as building_count,
+                    count(*) filter(where ln.type between {self.cfg.type_range.building_min} and {self.cfg.type_range.building_max}) as building_count,
                     count(*) as neighbor_count,
                     min(ln.type) as new_type
                 from "{self.cfg.domain.case_schema}"."{self.cfg.tables.landcover}" l
@@ -1307,7 +1323,7 @@ class InitializeDomainTask(BaseTask):
                 where l.type < %s
                     and st_area(l.geom) < %s
                 group by 1
-                having count(*) filter(where ln.type between 900 and 999) = count(*)
+                having count(*) filter(where ln.type between {self.cfg.type_range.building_min} and {self.cfg.type_range.building_max}) = count(*)
             """
             self.execute(sql_find, (self.cfg.type_range.building_min, self.cfg.cortyard_fill.polygon_area))
 
@@ -2136,7 +2152,7 @@ class InitializeDomainTask(BaseTask):
         # bridges
         progress('process bridges')
         self.execute(
-            f'update "{self.cfg.domain.case_schema}"."{self.cfg.tables.buildings_grid}" set height = null, nz = null where type = 907')
+            f'update "{self.cfg.domain.case_schema}"."{self.cfg.tables.buildings_grid}" set height = null, nz = null where type = {self.cfg.type_range.bridge}')
 
         self.execute(f"""
             update "{self.cfg.domain.case_schema}"."{self.cfg.tables.buildings_grid}" 
@@ -2147,7 +2163,7 @@ class InitializeDomainTask(BaseTask):
         self.execute(f"""
             update "{self.cfg.domain.case_schema}"."{self.cfg.tables.buildings_grid}" as b 
             set (is_bridge, lid_extra) = (select true, bb.lid_extra from "{self.cfg.domain.case_schema}"."{self.cfg.tables.buildings_grid}" as bb where bb.lid_extra is not null order by st_distance(b.point, bb.point) limit 1) 
-            where b.type = 907 and lid_extra is null
+            where b.type = {self.cfg.type_range.bridge} and lid_extra is null
         """)
 
         self.execute(f"""
@@ -2497,7 +2513,7 @@ class InitializeDomainTask(BaseTask):
             g.xcen - %s, g.ycen - %s, b.nz * %s, %s, b.azimuth, b.zenith, 
             true, true, b.id, b.rid, null from "{self.cfg.domain.case_schema}"."{self.cfg.tables.buildings_grid}" b 
             left outer join "{self.cfg.domain.case_schema}"."{self.cfg.tables.grid}" g on g.id = b.id 
-            where b.nz is not null and b.type != 907
+            where b.nz is not null and b.type != {self.cfg.type_range.bridge}
         """
         self.execute(sql_horiz_up,
                      (self.cfg.domain.origin_x, self.cfg.domain.origin_y, self.cfg.domain.dz, direction_up))
@@ -2543,7 +2559,7 @@ class InitializeDomainTask(BaseTask):
             select 
                 st_setsrid(st_boundary(st_union(st_buffer(geom, 0.0000001))), %s) as geom 
             from "{self.cfg.domain.case_schema}"."{self.cfg.tables.landcover}"
-            where type between 900 and 999;
+            where type between {self.cfg.type_range.building_min} and {self.cfg.type_range.building_max};
 
             alter table "{self.cfg.domain.case_schema}"."{self.cfg.tables.walls_outer}" 
             add column {self.cfg.idx.walls} serial;
@@ -2572,7 +2588,7 @@ class InitializeDomainTask(BaseTask):
                      from (
                         select lid, st_dumppoints(st_boundary(geom)) as pt 
                         from "{self.cfg.domain.case_schema}"."{self.cfg.tables.landcover}" 
-                        where type between 900 and 999
+                        where type between {self.cfg.type_range.building_min} and {self.cfg.type_range.building_max}
                      ) as dumps
                 ) 
                 select st_setsrid(geom, %s) as geom 

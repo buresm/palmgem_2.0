@@ -166,7 +166,7 @@ class CctProcessing(BaseTask):
                 set lid = lb.lid 
                 from "{schema}"."{t_landcover}" as lb  
                 where st_intersects(h.geom, lb.geom) 
-                  and lb.type between 900 and 999
+                  and lb.type between {self.cfg.type_range.building_min} and {self.cfg.type_range.building_max}
             """
             self.execute(sqltext)
 
@@ -175,7 +175,7 @@ class CctProcessing(BaseTask):
                 set inside = true 
                 from "{schema}"."{t_landcover}" as lb  
                 where st_intersects(h.geom, lb.geom) 
-                  and lb.type between 900 and 999
+                  and lb.type between {self.cfg.type_range.building_min} and {self.cfg.type_range.building_max}
             """
             self.execute(sqltext)
 
@@ -188,7 +188,7 @@ class CctProcessing(BaseTask):
                 from bo, "{schema}"."{t_landcover}" as lb 
                 where st_intersects(h.geom, lb.geom) 
                   and bo.lid = h.lid 
-                  and lb.type between 900 and 999
+                  and lb.type between {self.cfg.type_range.building_min} and {self.cfg.type_range.building_max}
             """
             self.execute(sqltext)
 
@@ -357,7 +357,7 @@ class CctProcessing(BaseTask):
             where th.i = bh.i 
               and th.j = bh.j 
               and st_intersects(bh.geom, lb.geom)
-              and lb.type between 900 and 999
+              and lb.type between {self.cfg.type_range.building_min} and {self.cfg.type_range.building_max}
         """
         self.execute(sqltext)
 
@@ -860,7 +860,7 @@ class CctProcessing(BaseTask):
             update "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_terrain}" as st set 
             lid = (
                 select l.lid from "{self.cfg.domain.case_schema}"."{self.cfg.tables.landcover}" as l 
-                where not l.type between 900 and 999
+                where not l.type between {self.cfg.type_range.building_min} and {self.cfg.type_range.building_max}
                 order by st_distance(geom3d, geom) limit 1
             )
             where lid is null
@@ -1116,7 +1116,7 @@ class CctProcessing(BaseTask):
 
         debug('Deciding which split take')
         sqltext = f"""
-            with lb as (select geom from "{self.cfg.domain.case_schema}"."{self.cfg.tables.landcover}" l where l.type between 900 and 999)
+            with lb as (select geom from "{self.cfg.domain.case_schema}"."{self.cfg.tables.landcover}" l where l.type between {self.cfg.type_range.building_min} and {self.cfg.type_range.building_max})
             update "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_wall}" as sw set split = 
             case when st_area(st_intersection(lb.geom, split1)) / st_area(split1) > 
                       st_area(st_intersection(lb.geom, split2)) / st_area(split2) 
@@ -1372,7 +1372,7 @@ class CctProcessing(BaseTask):
 
         # add rest of the roofs
         sqltext = f"""
-            with nb as (select geom from "{self.cfg.domain.case_schema}"."{self.cfg.tables.landcover}" l where l.type between 900 and 999)
+            with nb as (select geom from "{self.cfg.domain.case_schema}"."{self.cfg.tables.landcover}" l where l.type between {self.cfg.type_range.building_min} and {self.cfg.type_range.building_max})
             insert into "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_roof}" as sr 
             select g.id, g.i, g.j, null, g.geom 
             from "{self.cfg.domain.case_schema}"."{self.cfg.tables.grid}" as g, nb 

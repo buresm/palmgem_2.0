@@ -88,10 +88,19 @@ class LadGenerator(BaseTask):
 
 class LaiGenerator(BaseTask):
     def run(self):
-        # skip cleanly when the LAI / canopy-height rasters are not present in the
-        # case schema, rather than crashing on the raster intersection.
+        # LAI processing only applies when canopy.using_lai is enabled.
+        # initialize_domain disables it when the lai/canopy_height rasters are
+        # missing or empty, so this also skips cleanly in that case.
+        if not self.cfg.canopy.using_lai:
+            warning('canopy.using_lai is False (default, or disabled because the '
+                    'lai/canopy_height rasters were missing/empty); skipping LAI generation')
+            return
+        # even with using_lai enabled, skip cleanly if the rasters are not in the
+        # case schema (e.g. a staged lai-only run) rather than crashing on the
+        # raster intersection.
         if not self._lai_inputs_present():
-            warning('lai / canopy_height rasters not in case schema; skipping LAI generation')
+            warning('canopy.using_lai is True but lai/canopy_height rasters are not '
+                    'in the case schema; skipping LAI generation')
             return
         self.process_lai()
 

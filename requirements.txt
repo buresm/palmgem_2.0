@@ -16,3 +16,4 @@ shapely==2.0.5
 python-dotenv==1.2.2
 centerline==1.1.1
 SQLAlchemy==2.0.48
+geoalchemy2
