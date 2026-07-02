@@ -40,10 +40,10 @@ visual_check:
     show_plots: False
 
 # reference coordinate system of inputs (in case the vector or raster shape does not contain srid)
-srid: 32633
+srid: 32632
 dem_srid: 3035
-srid_input: 32633
-srid_palm: 32633
-srid_utm: 32633
+srid_input: 32632
+srid_palm: 32632
+srid_utm: 32632
 # projection lon-lat
 srid_wgs84: 4326

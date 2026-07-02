@@ -8,7 +8,7 @@ from datetime import datetime
 import numpy as np
 from math import ceil
 from .share_utils import variable_visualization, create_slanted_vtk
-from src.utils.capabilities import ensure_capability_flags, ensure_domain_geometry
+from src.utils.capabilities import ensure_capability_flags, ensure_domain_geometry, ensure_slurb_inputs
 
 class StaticDriverGen(BaseTask):
     """ task for generating the palm static driver netcdf file. """
@@ -1956,6 +1956,7 @@ class SlurbDriverGen(StaticDriverGen):
         """ """
         ensure_capability_flags(self.cfg, self.db)
         ensure_domain_geometry(self.cfg, self.db)
+        ensure_slurb_inputs(self.cfg, self.db)
         self.prepare()
         self.fill_file()
         self.finish_file()

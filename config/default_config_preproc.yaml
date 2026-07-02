@@ -53,6 +53,14 @@ rast_tr:
 # Requires an imported streetmaps table (tables.streetmaps_or).
 process_streetmaps: False
 
+# the imported landcover already carries final PALM types in a 'type' column
+# (LSM classes only, no building polygons). urban_atlas_osm then keeps the
+# types as-is instead of mapping UrbanAtlas codes through the mt table, and
+# streetmap polygons merged via process_streetmaps become building polygons
+# with default_building_type (rows left without a type get mt_default).
+landcover_has_types: False
+default_building_type: 901
+
 max_stl_area: 50
 max_fishnet_split_area: 5000.0 # m
 

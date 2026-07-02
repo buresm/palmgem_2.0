@@ -32,15 +32,15 @@ Two schemas hold all state:
 |----------|-------|-------|--------|--------------------|
 | `setup` | `SetupTask` | `domain.*`, SRIDs | in-memory config only | — (always runs) |
 | `gis_import` | `GisImporter` | `data_imports.vectors/rasters` + the files | `input_schema.imported_*` | — |
-| `urban_atlas_osm` | `UrbanAtlasOSM` | `input_schema` UrbanAtlas landcover (+ OSM if `process_streetmaps`) | `case_schema` landcover/fishnet/streetmap | `gis_import` |
+| `urban_atlas_osm` | `UrbanAtlasOSM` | `input_schema` imported landcover (+ OSM footprints if `process_streetmaps`) | `input_schema` landcover/fishnet/streetmap | `gis_import` |
 | `urban_atlas_dem_buildings` | `UrbanAtlasDemBuildings` | DEM + building-height rasters | `case_schema` dem/buildings | `gis_import` |
 | `initialize_domain` | `InitializeDomainTask` | `input_schema` tables + `surface_params_file` CSV (LOD2) | `case_schema.grid` + landcover/buildings/terrain/LSM/USM + `surface_params`; sets capability flags | `gis_import` (+ optional UA/OSM/DEM tasks) |
 | `lad` | `LadGenerator` | `case_schema` trees + grid | `trees_grid` (`lad_*`/`bad_*` columns) | `initialize_domain` |
 | `lai` | `LaiGenerator` | `case_schema` grid + LAI/canopy rasters | `lai`/`canopy_height` columns on grid | `initialize_domain` (+ imported LAI/canopy rasters) |
-| `prepare_slurb` | `PrepareSlurbInputs` | `case_schema` landcover + buildings | centreline / `building_area` tables | `initialize_domain` |
+| `prepare_slurb` | `PrepareSlurbInputs` | `input_schema` landcover (incl. building-type polygons) + buildings raster | `input_schema` centerline / `building_area` tables | `gis_import` |
 | `cct_processing` | `CctProcessing` | `case_schema` grid/landcover/buildings | slanted faces/vertices tables | `initialize_domain` (needs `do_cct: True`) |
 | `static_driver` | `StaticDriverGen` | `case_schema.grid` + parameter tables in config | `output/<case>_static.nc` | `initialize_domain` (+ `lad`/`lai` if you want trees) |
-| `slurb_driver` | `SlurbDriverGen` | `case_schema` grid + SLURB inputs | `output/<case>_slurb.nc` | `prepare_slurb` (needs `slurb: True`) |
+| `slurb_driver` | `SlurbDriverGen` | `case_schema` grid + SLURB inputs | `output/<case>_slurb.nc` | `prepare_slurb`, then `initialize_domain` to copy its tables into the case schema (needs `slurb: True`) |
 | `cct_driver` | `CCTDriverGen` | slanted-face tables | slanted NetCDF | `cct_processing` |
 | `finalize` | `FinalizeTask` | — | — | — (always runs) |
 
@@ -77,10 +77,10 @@ Split the build into import → prepare → emit. All three configs share `datab
 
 ```yaml
 # 1_import.yaml      — import + preprocess raw GIS into the input schema
-run_tasks: [gis_import, urban_atlas_osm, urban_atlas_dem_buildings]
+run_tasks: [gis_import, urban_atlas_osm, urban_atlas_dem_buildings]   # add prepare_slurb for SLURB runs
 
 # 2_prepare.yaml     — build the domain grid and all per-cell processing
-run_tasks: [initialize_domain, lad]      # add lai / prepare_slurb / cct_processing as needed
+run_tasks: [initialize_domain, lad]      # add lai / cct_processing as needed
 
 # 3_driver.yaml      — write the static driver from the prepared grid
 run_tasks: [static_driver]
@@ -134,6 +134,11 @@ fresh each time, the variant runs need nothing from the populate run beyond the 
 - A driver run still needs whatever it intends to write to already exist in the grid. For
   example, run `lad`/`lai` before a `static_driver` run that should contain tree data; run
   `prepare_slurb` (and set `slurb: True`) before `slurb_driver`.
+- `prepare_slurb` builds its `centerline`/`building_area` tables in the **input schema**, from
+  an input landcover that must already contain building-type polygons (900–999) next to street
+  polygons (201–203). `initialize_domain` then copies the two tables into the case schema —
+  and it drops and rebuilds the whole case schema each run, so `slurb_driver` always needs an
+  `initialize_domain` run *after* `prepare_slurb` in the pipeline order.
 - `static_driver_file` (and `slurb_driver_file`) default to `output/<case_schema>_static.nc`.
   Override them per run to keep parameter variants side by side.
 - Running everything in one config (`run_tasks: [gis_import, setup, initialize_domain,

@@ -54,6 +54,9 @@
 | **rast_tr.skewy** | 0 |  |
 | **max_stl_area** | 50.0 | area of urban object that are not considered in intersection |
 | **max_fishnet_split_area** | Maximal area of polygons that are not intersected by fishnet |  |
+| **process_streetmaps** | False | Merge OSM/footprint polygons (**tables.streetmaps_or**) into the landcover in the `urban_atlas_osm` task |
+| **landcover_has_types** | False | The imported landcover already carries final PALM types in a `type` column (LSM classes only). `urban_atlas_osm` keeps the types as-is instead of mapping UrbanAtlas codes through **mt**; polygons merged via **process_streetmaps** become building polygons with **default_building_type** |
+| **default_building_type** | 901 | PALM building type assigned to merged streetmap/footprint polygons when **landcover_has_types** is enabled |
 | **mt_default** | 103 | Default type that fills places in case of **domain.fill_boundary**. See Types in [docs](general.md)  |
 | **clean_up** | False | Delete unused table when they are no longer needed. Use carefully.|
 | **mt** | | Dictionary for transformation from UrbanAtlas and OpenStreetMaps into PALM types. Table can be found in [mt table](general.md) |

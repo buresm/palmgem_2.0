@@ -81,6 +81,35 @@ def ensure_capability_flags(cfg, db):
             debug('derived capability flag {} = {}', key, value)
 
 
+def ensure_slurb_inputs(cfg, db):
+    """Fail fast, before any file is written, when the SLURB input tables are
+    unusable.
+
+    ``slurb_driver`` unconditionally joins the ``centerline`` and
+    ``building_area`` tables in the case schema. ``prepare_slurb`` builds them
+    in the *input* schema and ``initialize_domain`` copies them over (skipping
+    missing or empty ones, and any re-run drops and rebuilds the whole case
+    schema). When they end up missing or empty the driver would otherwise
+    crash deep inside SQL with an opaque UndefinedTable error, or silently
+    emit a driver with no canyon geometry at all.
+    """
+    schema = cfg.domain.case_schema
+    problems = []
+    for table in (cfg.tables.centerline, cfg.tables.building_area):
+        if not _table_exists(db, schema, table):
+            problems.append(f'table "{schema}"."{table}" does not exist')
+            continue
+        count = db.fetchone(f'select count(*) from "{schema}"."{table}"')
+        if not count:
+            problems.append(f'table "{schema}"."{table}" is empty')
+
+    if problems:
+        raise RuntimeError(
+            'slurb_driver inputs are not usable: ' + '; '.join(problems) + '. '
+            'Run prepare_slurb (after gis_import) to build them in the input '
+            'schema, then initialize_domain to copy them into the case schema.')
+
+
 def ensure_domain_geometry(cfg, db):
     """Make the derived vertical domain geometry available without re-running
     initialize_domain.

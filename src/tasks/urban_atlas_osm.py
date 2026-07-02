@@ -138,22 +138,26 @@ class UrbanAtlasOSM(BaseTask):
         progress('clipping landcover by fishnet')
         debug('creating new clipped landcover table')
 
+        # typed landcover carries final palm types directly; the classic
+        # UrbanAtlas path carries the code column for the mt mapping instead
+        attr = 'type' if self.cfg.landcover_has_types else 'code'
+
         # sql logic using lower case and f-strings for table/schema identifiers
         sql_clip = f"""
             drop table if exists "{self.cfg.input_schema}"."{self.cfg.tables.im_landcover}" cascade;
 
-            create table "{self.cfg.input_schema}"."{self.cfg.tables.im_landcover}" as  
-            with f as (select geom as geom from "{self.cfg.input_schema}"."{self.cfg.tables.fishnet}"), 
-                 l as (select code, st_transform((st_dump(geom)).geom, %s) as geom 
-                        from "{self.cfg.input_schema}"."{self.cfg.tables.im_landcover_or}" 
+            create table "{self.cfg.input_schema}"."{self.cfg.tables.im_landcover}" as
+            with f as (select geom as geom from "{self.cfg.input_schema}"."{self.cfg.tables.fishnet}"),
+                 l as (select {attr}, st_transform((st_dump(geom)).geom, %s) as geom
+                        from "{self.cfg.input_schema}"."{self.cfg.tables.im_landcover_or}"
                         where st_intersects(st_transform(geom, %s), %s::geometry)
-                        ) 
-            select code, (st_dump(st_intersection(l.geom, f.geom))).geom as geom 
-            from l, f 
-            where st_intersects(l.geom, f.geom) and st_area(l.geom) > {self.cfg.max_fishnet_split_area} 
-            union all 
-            select code, l.geom 
-            from l, f 
+                        )
+            select {attr}, (st_dump(st_intersection(l.geom, f.geom))).geom as geom
+            from l, f
+            where st_intersects(l.geom, f.geom) and st_area(l.geom) > {self.cfg.max_fishnet_split_area}
+            union all
+            select {attr}, l.geom
+            from l, f
             where st_intersects(l.geom, f.geom) and st_area(l.geom) <= {self.cfg.max_fishnet_split_area};
         """
 
@@ -212,35 +216,40 @@ class UrbanAtlasOSM(BaseTask):
         """
         self.execute(sql_idx)
 
-        # 3. add columns for processing
-        verbose('add code attribute into streetmaps table')
-        sql_cols = f"""
-            alter table "{self.cfg.input_schema}"."{self.cfg.tables.streetmaps}" 
-            add column if not exists code integer,
-            add column if not exists cent geometry("point", %s)
-        """
-        self.execute(sql_cols, (self.cfg.srid,))
+        # steps 3-5 feed the code -> mt mapping; a typed landcover skips the
+        # mapping entirely (merged polygons get default_building_type instead)
+        if self.cfg.landcover_has_types:
+            debug('landcover already carries palm types; skipping landcover code join')
+        else:
+            # 3. add columns for processing
+            verbose('add code attribute into streetmaps table')
+            sql_cols = f"""
+                alter table "{self.cfg.input_schema}"."{self.cfg.tables.streetmaps}"
+                add column if not exists code integer,
+                add column if not exists cent geometry("point", %s)
+            """
+            self.execute(sql_cols, (self.cfg.srid,))
 
-        # 4. calculate centroids to optimize spatial join
-        verbose('calculating centroids for spatial join optimization')
-        sql_cent = f"""
-            update "{self.cfg.input_schema}"."{self.cfg.tables.streetmaps}" 
-            set cent = st_centroid(geom)
-        """
-        self.execute(sql_cent)
+            # 4. calculate centroids to optimize spatial join
+            verbose('calculating centroids for spatial join optimization')
+            sql_cent = f"""
+                update "{self.cfg.input_schema}"."{self.cfg.tables.streetmaps}"
+                set cent = st_centroid(geom)
+            """
+            self.execute(sql_cent)
 
-        # 5. join landcover data based on centroid location
-        verbose('joining code from landcover into streetmaps')
-        sql_join = f"""
-            update "{self.cfg.input_schema}"."{self.cfg.tables.streetmaps}" as s 
-            set code = (
-                select cast(code as integer) 
-                from "{self.cfg.input_schema}"."{self.cfg.tables.im_landcover}" as l 
-                where st_intersects(l.geom, s.cent) 
-                limit 1
-            )
-        """
-        self.execute(sql_join)
+            # 5. join landcover data based on centroid location
+            verbose('joining code from landcover into streetmaps')
+            sql_join = f"""
+                update "{self.cfg.input_schema}"."{self.cfg.tables.streetmaps}" as s
+                set code = (
+                    select cast(code as integer)
+                    from "{self.cfg.input_schema}"."{self.cfg.tables.im_landcover}" as l
+                    where st_intersects(l.geom, s.cent)
+                    limit 1
+                )
+            """
+            self.execute(sql_join)
 
         # 6. cleanup original import if enabled
         if self.cfg.clean_up:
@@ -295,36 +304,55 @@ class UrbanAtlasOSM(BaseTask):
         """
         self.execute(sql_diff)
 
-        # 4. restructure landcover columns
-        verbose('restructuring landcover table columns')
-        sql_alter = f"""
-            alter table "{self.cfg.input_schema}"."{self.cfg.tables.im_landcover}" 
-            rename column code to code_char;
+        if self.cfg.landcover_has_types:
+            # 4.-6. typed landcover: keep type as-is, merged streetmap polygons
+            # become building polygons with the configured default type
+            verbose('restructuring landcover table columns')
+            sql_alter = f"""
+                alter table "{self.cfg.input_schema}"."{self.cfg.tables.im_landcover}"
+                add column if not exists osm_id integer;
+            """
+            self.execute(sql_alter)
 
-            alter table "{self.cfg.input_schema}"."{self.cfg.tables.im_landcover}" 
-            add column if not exists osm_id integer, 
-            add column if not exists type integer, 
-            add column if not exists code integer;
-        """
-        self.execute(sql_alter)
+            debug(f'inserting streetmaps into landcover as building type {self.cfg.default_building_type}')
+            sql_ins = f"""
+                insert into "{self.cfg.input_schema}"."{self.cfg.tables.im_landcover}"
+                (type, osm_id, geom)
+                select {self.cfg.default_building_type}, cast(osm_id as integer), geom
+                from "{self.cfg.input_schema}"."{self.cfg.tables.streetmaps}"
+            """
+            self.execute(sql_ins)
+        else:
+            # 4. restructure landcover columns
+            verbose('restructuring landcover table columns')
+            sql_alter = f"""
+                alter table "{self.cfg.input_schema}"."{self.cfg.tables.im_landcover}"
+                rename column code to code_char;
 
-        # 5. cast char codes to integer
-        verbose('update code from char into integer')
-        sql_cast = f"""
-            update "{self.cfg.input_schema}"."{self.cfg.tables.im_landcover}" set 
-            code = cast(code_char as integer)
-        """
-        self.execute(sql_cast)
+                alter table "{self.cfg.input_schema}"."{self.cfg.tables.im_landcover}"
+                add column if not exists osm_id integer,
+                add column if not exists type integer,
+                add column if not exists code integer;
+            """
+            self.execute(sql_alter)
 
-        # 6. insert streetmaps into landcover
-        debug('inserting streetmaps into landcover')
-        sql_ins = f"""
-            insert into "{self.cfg.input_schema}"."{self.cfg.tables.im_landcover}" 
-            (type, osm_id, code, geom) 
-            select null, cast(osm_id as integer), code, geom 
-            from "{self.cfg.input_schema}"."{self.cfg.tables.streetmaps}"
-        """
-        self.execute(sql_ins)
+            # 5. cast char codes to integer
+            verbose('update code from char into integer')
+            sql_cast = f"""
+                update "{self.cfg.input_schema}"."{self.cfg.tables.im_landcover}" set
+                code = cast(code_char as integer)
+            """
+            self.execute(sql_cast)
+
+            # 6. insert streetmaps into landcover
+            debug('inserting streetmaps into landcover')
+            sql_ins = f"""
+                insert into "{self.cfg.input_schema}"."{self.cfg.tables.im_landcover}"
+                (type, osm_id, code, geom)
+                select null, cast(osm_id as integer), code, geom
+                from "{self.cfg.input_schema}"."{self.cfg.tables.streetmaps}"
+            """
+            self.execute(sql_ins)
 
         # 7. handle primary key and cleanup
         debug('finalizing table keys')
@@ -343,6 +371,19 @@ class UrbanAtlasOSM(BaseTask):
             self.execute(sql_cleanup)
 
         # 8. join palm types based on mapping table
+        if self.cfg.landcover_has_types:
+            # types are already final; only rows without one (e.g. the
+            # fill_boundary background polygon) fall back to mt_default,
+            # mirroring the else-branch of the classic mapping below
+            progress('landcover types kept as imported; skipping mt mapping')
+            sql_default = f"""
+                update "{self.cfg.input_schema}"."{self.cfg.tables.im_landcover}" set
+                type = {self.cfg.mt_default}
+                where type is null
+            """
+            self.execute(sql_default)
+            return
+
         progress('joining user defined class and landcover classes into palm types')
         debug('updating palm type mapping')
 
@@ -353,10 +394,10 @@ class UrbanAtlasOSM(BaseTask):
             case_parts.append(f"when code = {m[0]} then case when osm_id is null then {m[1]} else {m[2]} end")
 
         sql_palm = f"""
-            update "{self.cfg.input_schema}"."{self.cfg.tables.im_landcover}" set 
-            type = case 
-                {" ".join(case_parts)} 
-                else {self.cfg.mt_default} 
+            update "{self.cfg.input_schema}"."{self.cfg.tables.im_landcover}" set
+            type = case
+                {" ".join(case_parts)}
+                else {self.cfg.mt_default}
             end
         """
         self.execute(sql_palm)

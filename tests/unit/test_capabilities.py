@@ -1,7 +1,7 @@
 """Unit tests for staged-run capability-flag derivation (no live DB needed)."""
 import pytest
 from src.config_loader import ConfigObj
-from src.utils.capabilities import ensure_capability_flags, ensure_domain_geometry
+from src.utils.capabilities import ensure_capability_flags, ensure_domain_geometry, ensure_slurb_inputs
 
 
 def _make_cfg(**flags):
@@ -18,6 +18,8 @@ def _make_cfg(**flags):
             'walls': 'walls',
             'grid': 'grid',
             'trees': 'trees',
+            'centerline': 'centerline',
+            'building_area': 'building_area',
         },
         'type_range': {'building_min': 900, 'building_max': 999},
         'landcover': {'surface_fractions': False},
@@ -30,11 +32,13 @@ def _make_cfg(**flags):
 class FakeDB:
     """Answers information_schema/exists/count probes without a real database."""
 
-    def __init__(self, tables=(), columns=(), building_count=0, min_height=None):
+    def __init__(self, tables=(), columns=(), building_count=0, min_height=None,
+                 row_counts=None):
         self.tables = set(tables)
         self.columns = set(columns)          # set of (table, column)
         self.building_count = building_count
         self.min_height = min_height         # answer to select min(height)
+        self.row_counts = row_counts or {}   # per-table answers to select count(*)
         self.queried = False
 
     def fetchone(self, query, params=None):
@@ -47,6 +51,9 @@ class FakeDB:
             _schema, table, column = params
             return (table, column) in self.columns
         if 'count(*)' in q:
+            for table, count in self.row_counts.items():
+                if f'"{table}"' in q:
+                    return count
             return self.building_count
         if 'min(height)' in q:
             return self.min_height
@@ -132,6 +139,40 @@ def test_missing_flags_are_filled_not_overridden():
     assert cfg.has_buildings is False
     # the others get derived
     assert cfg.has_3d_buildings is False
+
+
+# --- ensure_slurb_inputs ----------------------------------------------------
+
+def test_slurb_inputs_ok_when_tables_populated():
+    cfg = _make_cfg()
+    db = FakeDB(tables={'centerline', 'building_area'},
+                row_counts={'centerline': 120, 'building_area': 35})
+    ensure_slurb_inputs(cfg, db)  # must not raise
+
+
+def test_slurb_inputs_missing_table_raises():
+    cfg = _make_cfg()
+    db = FakeDB(tables={'centerline'}, row_counts={'centerline': 120})
+    with pytest.raises(RuntimeError, match='building_area.*does not exist'):
+        ensure_slurb_inputs(cfg, db)
+
+
+def test_slurb_inputs_empty_table_raises():
+    cfg = _make_cfg()
+    db = FakeDB(tables={'centerline', 'building_area'},
+                row_counts={'centerline': 0, 'building_area': 35})
+    with pytest.raises(RuntimeError, match='centerline.*is empty'):
+        ensure_slurb_inputs(cfg, db)
+
+
+def test_slurb_inputs_reports_all_problems():
+    """Both tables unusable -> one error naming both, with the actionable hint."""
+    cfg = _make_cfg()
+    db = FakeDB(tables={'building_area'}, row_counts={'building_area': 0})
+    with pytest.raises(RuntimeError, match='prepare_slurb') as exc:
+        ensure_slurb_inputs(cfg, db)
+    assert 'centerline' in str(exc.value)
+    assert 'building_area' in str(exc.value)
 
 
 # --- ensure_domain_geometry ------------------------------------------------
