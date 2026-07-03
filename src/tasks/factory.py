@@ -9,6 +9,9 @@ from .trees_generator import LadGenerator, LaiGenerator
 from .urban_atlas_osm import UrbanAtlasOSM
 from .urban_atlas_dem_buildings import UrbanAtlasDemBuildings
 from .finalize import FinalizeTask
+from .qa_report import QaReportTask
+from .qgis_export import QgisExportTask
+from .pids_check import PidsCheckTask
 
 class TaskFactory:
     def __init__(self, cfg, db):
@@ -28,7 +31,10 @@ class TaskFactory:
                 "lai": LaiGenerator,
                 "urban_atlas_osm": UrbanAtlasOSM,
                 "urban_atlas_dem_buildings": UrbanAtlasDemBuildings,
-                "setup": SetupTask
+                "setup": SetupTask,
+                "qa_report": QaReportTask,
+                "qgis_export": QgisExportTask,
+                "pids_check": PidsCheckTask
         }
 
     def get(self, task_key):

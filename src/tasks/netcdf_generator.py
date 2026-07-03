@@ -9,6 +9,7 @@ import numpy as np
 from math import ceil
 from .share_utils import variable_visualization, create_slanted_vtk
 from src.utils.capabilities import ensure_capability_flags, ensure_domain_geometry, ensure_slurb_inputs
+from src.utils.pids import run_pids_check
 
 class StaticDriverGen(BaseTask):
     """ task for generating the palm static driver netcdf file. """
@@ -84,6 +85,7 @@ class StaticDriverGen(BaseTask):
     def finish_file(self):
         self.check_consistency()
         self.ncfile.close()
+        run_pids_check(self.cfg, self.cfg.domain.static_driver_file, 'static')
 
     def nc_create_file(self, file):
         """
@@ -425,6 +427,10 @@ class StaticDriverGen(BaseTask):
         var = self.ncfile.createVariable(vn, vt, ('y', 'x'), fill_value=self.cfg.fill_values[vt])
         var[:, :] = np.reshape(np.asarray([x[0] for x in res], dtype=vt), (ny, nx))
         del res
+
+        # PIDS-required variable attributes (every other variable carries them)
+        self.nc_write_attribute(vn, 'long_name', 'terrain height')
+        self.nc_write_attribute(vn, 'units', 'm')
 
         # update task setting for terrain metadata
         self.cfg.update_setting('terrain_max_height', float(np.max(var)))
@@ -1976,6 +1982,7 @@ class SlurbDriverGen(StaticDriverGen):
         """ """
         self.check_consitency_slurb()
         self.ncfile.close()
+        run_pids_check(self.cfg, self.cfg.domain.slurb_driver_file, 'slurb')
 
     def create_slurb_dims(self):
         """
@@ -2052,7 +2059,14 @@ class SlurbDriverGen(StaticDriverGen):
                 null :: double precision as building_frontal_area_fraction,
                 null :: double precision as street_canyon_aspect_ratio,
                 null :: double precision as street_canyon_orientation
-            from "{schema}"."{self.cfg.tables.grid}" g
+            from "{schema}"."{self.cfg.tables.grid}" g;
+
+            -- id is joined once per written variable; geom drives the
+            -- fraction/frontal/canyon spatial updates
+            create index {self.cfg.tables.grid_slurb}_id_idx
+            on "{schema}"."{self.cfg.tables.grid_slurb}" (id);
+            create index {self.cfg.tables.grid_slurb}_geom_idx
+            on "{schema}"."{self.cfg.tables.grid_slurb}" using gist(geom);
         """
         self.execute(sql_init)
 
@@ -2177,7 +2191,7 @@ class SlurbDriverGen(StaticDriverGen):
                     self.ncfile.variables[vn][i, :, :] = data_slice
 
                 self.nc_write_attribute(vn, 'long_name', self.cfg.slurb_vars[vn].long_name)
-                self.nc_write_attribute(vn, 'units', self.cfg.slurb_vars[vn].vn_units)
+                self.nc_write_attribute(vn, 'units', self.cfg.slurb_vars[vn].units)
                 self.nc_write_attribute(vn, 'res_orig', self.cfg.domain.dz)
                 self.nc_write_attribute(vn, 'grid_mapping', 'crs')
                 self.nc_write_attribute(vn, 'coordinates', 'E_UTM N_UTM lon lat')

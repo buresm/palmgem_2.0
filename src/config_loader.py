@@ -155,7 +155,8 @@ def load_config(config_path='', config_folder='config'):
         'default_usm_config.yaml',
         'default_attribute_mapping.yaml',
         'default_attribute_spec.yaml',
-        'default_vars_bounds.yaml'
+        'default_vars_bounds.yaml',
+        'default_qa.yaml'
     ]
 
     # 1. Load Defaults

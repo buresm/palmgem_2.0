@@ -420,11 +420,14 @@ class InitializeDomainTask(BaseTask):
             # 4. transform and clip logic
             if srid_rel != self.cfg.srid_palm:
                 debug(f'reprojecting raster {rel} from {srid_rel} to {self.cfg.srid_palm}')
+                # clip against the envelope transformed into the raster srid:
+                # transforming the raster inside the where clause would copy
+                # every tile per test and defeat the raster spatial index
                 sql_trans = f"""
                     with raster_transform as (
                         select st_transform(t.rast, %s) as rast
                         from "{self.cfg.input_schema}"."{rel}" as t
-                        where st_intersects(st_transform(t.rast, %s), %s::geometry)
+                        where st_intersects(t.rast, st_transform(%s::geometry, %s))
                     ),
                     ref as (
                         select 
@@ -436,7 +439,7 @@ class InitializeDomainTask(BaseTask):
                     select st_union(st_snaptogrid(t.rast, r.ulx, r.uly, r.scx, r.scy))
                     from raster_transform as t, ref as r
                 """
-                self.execute(sql_trans, (self.cfg.srid_palm, self.cfg.srid_palm, grid_ext))
+                self.execute(sql_trans, (self.cfg.srid_palm, grid_ext, srid_rel))
             else:
                 debug(f'clipping raster {rel} using existing srid')
                 sql_ins = f"""
@@ -1088,11 +1091,11 @@ class InitializeDomainTask(BaseTask):
         # 3. gap filling for grid points outside polygons (nearest neighbor)
         debug('filling grid cells outside polygons using nearest neighbor')
         sql_gap_fill = f"""
-            update "{self.cfg.domain.case_schema}"."{self.cfg.tables.grid}" g 
+            update "{self.cfg.domain.case_schema}"."{self.cfg.tables.grid}" g
             set lid = (
-                select l.lid from "{self.cfg.domain.case_schema}"."{self.cfg.tables.landcover}" l 
-                order by st_distance(l.geom, g.point) limit 1
-            ) 
+                select l.lid from "{self.cfg.domain.case_schema}"."{self.cfg.tables.landcover}" l
+                order by l.geom <-> g.point limit 1
+            )
             where g.lid is null
         """
         self.execute(sql_gap_fill)
@@ -1118,11 +1121,11 @@ class InitializeDomainTask(BaseTask):
                     and lg.type between %s and %s
                 group by g.id;
 
-                update "{self.cfg.domain.case_schema}"."{self.cfg.tables.grid}" g 
+                update "{self.cfg.domain.case_schema}"."{self.cfg.tables.grid}" g
                 set lid = (
-                    select l.lid from "{self.cfg.domain.case_schema}"."{self.cfg.tables.landcover}" l 
+                    select l.lid from "{self.cfg.domain.case_schema}"."{self.cfg.tables.landcover}" l
                     where not l.type between %s and %s
-                    order by st_distance(l.geom, g.point) limit 1
+                    order by l.geom <-> g.point limit 1
                 )
                 where id in (select id from temp_b_drop where sum_area < %s)
             """
@@ -1270,11 +1273,11 @@ class InitializeDomainTask(BaseTask):
             sql_update = f"""
                 update "{self.cfg.domain.case_schema}"."{self.cfg.tables.landcover}" as l 
                 set (type, catland, albedo, emissivity) = (
-                    select b.type, b.catland, b.albedo, b.emissivity 
-                    from "{self.cfg.domain.case_schema}"."{self.cfg.tables.landcover}" as b 
-                    where b.type between %s and %s 
-                    order by st_distance(l.geom, b.geom) limit 1
-                ) 
+                    select b.type, b.catland, b.albedo, b.emissivity
+                    from "{self.cfg.domain.case_schema}"."{self.cfg.tables.landcover}" as b
+                    where b.type between %s and %s
+                    order by b.geom <-> l.geom limit 1
+                )
                 where lid in {lids_tuple}
             """
             self.execute(sql_update, (self.cfg.type_range.building_min, self.cfg.type_range.building_max))
@@ -1283,11 +1286,11 @@ class InitializeDomainTask(BaseTask):
             sql_update = f"""
                 update "{self.cfg.domain.case_schema}"."{self.cfg.tables.landcover}" as l 
                 set type = (
-                    select b.type 
-                    from "{self.cfg.domain.case_schema}"."{self.cfg.tables.landcover}" as b 
-                    where b.type between %s and %s 
-                    order by st_distance(l.geom, b.geom) limit 1
-                ) 
+                    select b.type
+                    from "{self.cfg.domain.case_schema}"."{self.cfg.tables.landcover}" as b
+                    where b.type between %s and %s
+                    order by b.geom <-> l.geom limit 1
+                )
                 where lid in {lids_tuple}
             """
             self.execute(sql_update, (self.cfg.type_range.building_min, self.cfg.type_range.building_max))
@@ -1450,6 +1453,8 @@ class InitializeDomainTask(BaseTask):
             f'alter table "{self.cfg.domain.case_schema}"."{self.cfg.tables.buildings_grid}" add primary key (i, j, lid)')
         self.execute(
             f'create index buildings_geom_idx on "{self.cfg.domain.case_schema}"."{self.cfg.tables.buildings_grid}" using gist(geom)')
+        self.execute(
+            f'create index buildings_point_idx on "{self.cfg.domain.case_schema}"."{self.cfg.tables.buildings_grid}" using gist(point)')
         self.execute(f'alter table "{self.cfg.domain.case_schema}"."{self.cfg.tables.buildings_grid}" '
                      f'add if not exists height double precision, add if not exists nz integer')
 
@@ -2141,7 +2146,7 @@ class InitializeDomainTask(BaseTask):
         # fill missing bottom heights
         self.execute(f"""
             update "{self.cfg.domain.case_schema}"."{self.cfg.tables.buildings_grid}" as bd 
-            set height_bottom = (select bdd.height_bottom from "{self.cfg.domain.case_schema}"."{self.cfg.tables.buildings_grid}" as bdd where (bdd.height_bottom != 0 or bdd.height_bottom is not null) order by st_distance(bdd.point, bd.point) limit 1) 
+            set height_bottom = (select bdd.height_bottom from "{self.cfg.domain.case_schema}"."{self.cfg.tables.buildings_grid}" as bdd where (bdd.height_bottom != 0 or bdd.height_bottom is not null) order by bdd.point <-> bd.point limit 1)
             where bd.has_bottom and bd.height_bottom is null
         """)
 
@@ -2162,7 +2167,7 @@ class InitializeDomainTask(BaseTask):
 
         self.execute(f"""
             update "{self.cfg.domain.case_schema}"."{self.cfg.tables.buildings_grid}" as b 
-            set (is_bridge, lid_extra) = (select true, bb.lid_extra from "{self.cfg.domain.case_schema}"."{self.cfg.tables.buildings_grid}" as bb where bb.lid_extra is not null order by st_distance(b.point, bb.point) limit 1) 
+            set (is_bridge, lid_extra) = (select true, bb.lid_extra from "{self.cfg.domain.case_schema}"."{self.cfg.tables.buildings_grid}" as bb where bb.lid_extra is not null order by bb.point <-> b.point limit 1)
             where b.type = {self.cfg.type_range.bridge} and lid_extra is null
         """)
 
@@ -2174,7 +2179,7 @@ class InitializeDomainTask(BaseTask):
 
         self.execute(f"""
             update "{self.cfg.domain.case_schema}"."{self.cfg.tables.buildings_grid}" as br 
-            set (height, height_bottom) = (select brn.height, brn.height_bottom from "{self.cfg.domain.case_schema}"."{self.cfg.tables.buildings_grid}" as brn where (brn.height != 0 or brn.height is not null) order by st_distance(brn.point, br.point) limit 1) 
+            set (height, height_bottom) = (select brn.height, brn.height_bottom from "{self.cfg.domain.case_schema}"."{self.cfg.tables.buildings_grid}" as brn where (brn.height != 0 or brn.height is not null) order by brn.point <-> br.point limit 1)
             where (br.height is null or br.height = 0) and br.is_bridge
         """)
 

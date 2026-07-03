@@ -182,6 +182,11 @@ class PrepareSlurbInputs(BaseTask):
             select (st_pixelaspoints(b.rast)).geom as geom,
                    (st_pixelaspoints(b.rast)).val  as val
             from "{schema}"."{self.cfg.tables.buildings_height}" b;
+
+            -- the nearest-pixel laterals below and in the front-area step scan
+            -- this table per point; without the index they are minutes-per-query
+            create index if not exists {self.cfg.tables.build_pixel}_geom_idx
+            on "{schema}"."{self.cfg.tables.build_pixel}" using gist(geom);
         """
         self.execute(sql_pixel)
         self.set_table_owner(schema, self.cfg.tables.build_pixel)
@@ -258,12 +263,14 @@ class PrepareSlurbInputs(BaseTask):
                                      from generate_series(0, floor(d.len / sublen)::integer) as t(i)
                                      where (sublen * i)/len <> 1.0) as d2;
 
-            -- primary: direct raster nearest value
+            -- primary: direct raster nearest value. Transform the point into the
+            -- raster srid instead of the raster into {self.cfg.srid}: transforming
+            -- the raster copies every tile per row and defeats its spatial index.
             update "{schema}"."{self.cfg.tables.outer_wall}" ow
             set building_height = (
-                select st_nearestvalue(st_transform(b.rast, {self.cfg.srid}), ow.point)
+                select st_nearestvalue(b.rast, st_transform(ow.point, st_srid(b.rast)))
                 from "{schema}"."{self.cfg.tables.buildings_height}" b
-                where st_intersects(st_transform(b.rast, {self.cfg.srid}), ow.point)
+                where st_intersects(b.rast, st_transform(ow.point, st_srid(b.rast)))
                 limit 1
             );
 

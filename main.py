@@ -12,7 +12,10 @@ def _run_task(factory, name):
     progress("---> task '{}' starting", name)
     t0 = time.perf_counter()
     factory.get(name).run()
-    progress("<--- task '{}' finished ({:.1f}s)", name, time.perf_counter() - t0)
+    elapsed = time.perf_counter() - t0
+    progress("<--- task '{}' finished ({:.1f}s)", name, elapsed)
+    # per-task timings of this run, consumed by the qa_report task
+    factory.cfg._settings.setdefault('task_timings', []).append((name, round(elapsed, 1)))
 
 
 def main(args=None):

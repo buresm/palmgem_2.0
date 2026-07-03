@@ -42,6 +42,9 @@ Two schemas hold all state:
 | `static_driver` | `StaticDriverGen` | `case_schema.grid` + parameter tables in config | `output/<case>_static.nc` | `initialize_domain` (+ `lad`/`lai` if you want trees) |
 | `slurb_driver` | `SlurbDriverGen` | `case_schema` grid + SLURB inputs | `output/<case>_slurb.nc` | `prepare_slurb`, then `initialize_domain` to copy its tables into the case schema (needs `slurb: True`) |
 | `cct_driver` | `CCTDriverGen` | slanted-face tables | slanted NetCDF | `cct_processing` |
+| `qa_report` | `QaReportTask` | driver NetCDFs + `case_schema` tables | `output/<case>_qa_report.html` (variable maps/histograms, PIDS findings, landcover/building stats, task timings) | the driver task(s) whose output it should analyse |
+| `pids_check` | `PidsCheckTask` | driver NetCDFs | log findings (PIDS compliance) | the driver task(s); also runs automatically after each driver when `pids.enabled` |
+| `qgis_export` | `QgisExportTask` | `case_schema` tables | `output/<case>.qgs` styled QGIS project (PostGIS layers) | `initialize_domain` (any subset of tables works) |
 | `finalize` | `FinalizeTask` | — | — | — (always runs) |
 
 > The driver tasks (`static_driver`, `slurb_driver`, `cct_processing`/`cct_driver`) depend on

@@ -21,9 +21,11 @@ class GisImporter(BaseTask):
         os.environ.pop("PROJ_LIB", None)
         os.environ.pop("PROJ_DATA", None)
 
-        # 2. Process all Vectors
-        vectors = dict(self.cfg.data_imports.vectors._settings)
-        rasters = dict(self.cfg.data_imports.rasters._settings)
+        # 2. Process all Vectors. data_imports replaces the defaults wholesale,
+        # so either section may be absent or empty (vector-only / raster-only
+        # imports) — do not assume both keys exist.
+        vectors = self._import_section('vectors')
+        rasters = self._import_section('rasters')
         progress("importing {} vector(s) and {} raster(s) into schema '{}'",
                  len(vectors), len(rasters), self.cfg.input_schema)
 
@@ -84,6 +86,16 @@ class GisImporter(BaseTask):
             self._verify_imported(self.cfg.input_schema, table)
 
         progress("gis import complete")
+
+    def _import_section(self, section):
+        """Return {name: entry} for a data_imports section (vectors/rasters),
+        tolerating a missing or empty section so vector-only or raster-only
+        configs run instead of crashing on the absent key."""
+        sec = self.cfg.data_imports.get(section, None)
+        if sec is None or not getattr(sec, '_settings', None):
+            verbose(f"no {section} defined in data_imports; skipping")
+            return {}
+        return dict(sec._settings)
 
     def _verify_imported(self, schema, table):
         """Confirm a table was actually created and populated in PostgreSQL.

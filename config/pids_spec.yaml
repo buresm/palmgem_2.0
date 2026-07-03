@@ -1,0 +1,155 @@
+# PALM Input Data Standard (PIDS) compliance spec, consumed by src/utils/pids.py.
+#
+# Structure per driver type:
+#   required_global_attributes : global attrs every driver file must carry
+#   required_dimensions        : dimensions that must exist (size > 0)
+#   coordinate_variables       : 1-D coordinate vars checked for monotonic,
+#                                uniformly spaced values
+#   exempt_variables           : variables excluded from the generic
+#                                long_name/units/_FillValue expectations
+#   variable_rules             : per-variable hard rules (violations are errors;
+#                                generic expectations only produce warnings):
+#       dims           - exact dimension names, in order
+#       dtype_kind     - numpy dtype kind: f (float), i (int), b/i1 (byte)
+#       required_attrs - attributes that must be present on the variable
+#
+# This is a practical subset of PIDS aimed at what PALM-GeM writes; extend the
+# variable_rules as more variables need pinning.
+
+pids_version: '1.12'
+
+static:
+    required_global_attributes:
+        - Conventions
+        - origin_x
+        - origin_y
+        - origin_z
+        - origin_lat
+        - origin_lon
+        - origin_time
+        - rotation_angle
+    required_dimensions: [x, y]
+    coordinate_variables: [x, y, z, zlad, zsoil]
+    exempt_variables: [crs, E_UTM, N_UTM, lon, lat]
+    variable_rules:
+        zt:
+            dims: [y, x]
+            dtype_kind: f
+            required_attrs: [units, long_name, _FillValue]
+        vegetation_type:
+            dims: [y, x]
+            required_attrs: [long_name, _FillValue]
+        pavement_type:
+            dims: [y, x]
+            required_attrs: [long_name, _FillValue]
+        water_type:
+            dims: [y, x]
+            required_attrs: [long_name, _FillValue]
+        soil_type:
+            dims: [y, x]
+            required_attrs: [long_name, _FillValue]
+        buildings_2d:
+            dims: [y, x]
+            dtype_kind: f
+            required_attrs: [units, long_name, _FillValue, lod]
+        building_id:
+            dims: [y, x]
+            dtype_kind: i
+            required_attrs: [long_name, _FillValue]
+        building_type:
+            dims: [y, x]
+            required_attrs: [long_name, _FillValue]
+        buildings_3d:
+            dims: [z, y, x]
+            required_attrs: [long_name, _FillValue, lod]
+        lad:
+            dims: [zlad, y, x]
+            dtype_kind: f
+            required_attrs: [long_name, _FillValue]
+        bad:
+            dims: [zlad, y, x]
+            dtype_kind: f
+            required_attrs: [long_name, _FillValue]
+
+slurb:
+    required_global_attributes:
+        - Conventions
+        - origin_x
+        - origin_y
+        - origin_z
+        - origin_lat
+        - origin_lon
+        - origin_time
+        - rotation_angle
+    required_dimensions: [x, y]
+    coordinate_variables: [x, y, nroad_3d, nroof_3d, nwall_3d, nwin_3d]
+    exempt_variables: [crs, E_UTM, N_UTM, lon, lat]
+    variable_rules:
+        building_plan_area_fraction:
+            dims: [y, x]
+            dtype_kind: f
+            required_attrs: [long_name, _FillValue]
+        building_frontal_area_fraction:
+            dims: [y, x]
+            dtype_kind: f
+            required_attrs: [long_name, _FillValue]
+        building_height:
+            dims: [y, x]
+            dtype_kind: f
+            required_attrs: [long_name, _FillValue]
+        street_canyon_aspect_ratio:
+            dims: [y, x]
+            dtype_kind: f
+            required_attrs: [long_name, _FillValue]
+        street_canyon_orientation:
+            dims: [y, x]
+            dtype_kind: f
+            required_attrs: [long_name, _FillValue]
+        c_road:
+            dims: [nroad_3d, y, x]
+            dtype_kind: f
+            required_attrs: [units, long_name, _FillValue]
+        dz_road:
+            dims: [nroad_3d, y, x]
+            dtype_kind: f
+            required_attrs: [units, long_name, _FillValue]
+        lambda_road:
+            dims: [nroad_3d, y, x]
+            dtype_kind: f
+            required_attrs: [units, long_name, _FillValue]
+        c_roof:
+            dims: [nroof_3d, y, x]
+            dtype_kind: f
+            required_attrs: [units, long_name, _FillValue]
+        dz_roof:
+            dims: [nroof_3d, y, x]
+            dtype_kind: f
+            required_attrs: [units, long_name, _FillValue]
+        lambda_roof:
+            dims: [nroof_3d, y, x]
+            dtype_kind: f
+            required_attrs: [units, long_name, _FillValue]
+        c_wall:
+            dims: [nwall_3d, y, x]
+            dtype_kind: f
+            required_attrs: [units, long_name, _FillValue]
+        dz_wall:
+            dims: [nwall_3d, y, x]
+            dtype_kind: f
+            required_attrs: [units, long_name, _FillValue]
+        lambda_wall:
+            dims: [nwall_3d, y, x]
+            dtype_kind: f
+            required_attrs: [units, long_name, _FillValue]
+        c_window:
+            dims: [nwin_3d, y, x]
+            dtype_kind: f
+            required_attrs: [units, long_name, _FillValue]
+        dz_window:
+            dims: [nwin_3d, y, x]
+            dtype_kind: f
+            required_attrs: [units, long_name, _FillValue]
+        lambda_window:
+            dims: [nwin_3d, y, x]
+            dtype_kind: f
+            required_attrs: [units, long_name, _FillValue]

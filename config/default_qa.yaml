@@ -1,0 +1,19 @@
+# QA / validation / export tool defaults (pids_check, qa_report and
+# qgis_export tasks; see docs/tasks.md).
+
+# PALM Input Data Standard compliance validation. Runs automatically right
+# after each driver NetCDF is written; the standalone pids_check task
+# re-validates existing files regardless of `enabled`.
+pids:
+    enabled: True
+    strict: False                  # True -> abort the pipeline on PIDS errors
+    spec_file: 'pids_spec.yaml'    # relative to config/, or an absolute path
+
+# qa_report task: self-contained HTML report per case.
+qa_report:
+    report_file: ''                # default: output/<case_schema>_qa_report.html
+
+# qgis_export task: styled QGIS project pointing at the case schema.
+qgis_export:
+    project_file: ''               # default: output/<case_schema>.qgs
+    include_password: False        # embed the DB password in the project file

@@ -472,6 +472,17 @@
 
 ---
 
+## QA, validation and export tools
+
+| Configuration Item | Default value | Describtion |
+|:------------------|:---------------|:---------------|
+| **pids.enabled** | True | Validate each driver NetCDF against the PALM Input Data Standard right after it is written (findings are logged; see `config/pids_spec.yaml`) |
+| **pids.strict** | False | Abort the pipeline when the PIDS check reports errors |
+| **pids.spec_file** | pids_spec.yaml | PIDS spec file; relative paths resolve against `config/` |
+| **qa_report.report_file** | '' | Output path of the `qa_report` HTML; empty means `output/<case_schema>_qa_report.html` |
+| **qgis_export.project_file** | '' | Output path of the `qgis_export` project; empty means `output/<case_schema>.qgs` |
+| **qgis_export.include_password** | False | Embed the database password in the QGIS project file (otherwise QGIS prompts once) |
+
 ## Shortcuts used in building_pars / building_surface_pars formulas
 
 | Shortcut | Meaning |
