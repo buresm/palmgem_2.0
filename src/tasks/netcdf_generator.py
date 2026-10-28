@@ -2,14 +2,18 @@ from .base import BaseTask
 from src.logger import debug, extra_verbose, progress, verbose, warning, error, sql_debug, sql_verbose
 import os
 from netCDF4 import Dataset
+import re
 import sys
 from pathlib import Path
 from datetime import datetime
 import numpy as np
-from math import ceil
+from math import ceil, pi
 from .share_utils import variable_visualization, create_slanted_vtk
-from src.utils.capabilities import ensure_capability_flags, ensure_domain_geometry, ensure_slurb_inputs
+from src.utils.capabilities import (ensure_capability_flags, ensure_domain_geometry,
+                                    ensure_slurb_inputs, ensure_impervious_correction)
 from src.utils.pids import run_pids_check
+from src.utils.slurb_window import (window_cells, box_mean, box_sum,
+                                    weighted_box_mean, dominant_type)
 
 class StaticDriverGen(BaseTask):
     """ task for generating the palm static driver netcdf file. """
@@ -21,6 +25,7 @@ class StaticDriverGen(BaseTask):
         # initialize_domain in-process.
         ensure_capability_flags(self.cfg, self.db)
         ensure_domain_geometry(self.cfg, self.db)
+        ensure_impervious_correction(self.cfg, self.db)
         self.prepare_file()
         self.fill_file()
         self.finish_file()
@@ -107,7 +112,6 @@ class StaticDriverGen(BaseTask):
 
         # 2. create the new dataset
         try:
-            # keywords for format are kept lower case
             self.ncfile = Dataset(file, "w", format="NETCDF4")
             debug(f'created: {file}')
             self.cfg.update_setting('nc_last_created', str(fp))
@@ -151,7 +155,6 @@ class StaticDriverGen(BaseTask):
         """
         debug("Writing CRS to file...")
 
-        # sql query is strictly lower case
         sql_crs = 'select srtext from "spatial_ref_sys" where srid = find_srid(%s, %s, %s)'
 
         # execute via task system
@@ -277,7 +280,6 @@ class StaticDriverGen(BaseTask):
         and initializes the spatial dimensions and variables in the netcdf file.
         """
         # 1. extract 1d x and y coordinates relative to domain origin
-        # sql queries are strictly lower case
         sql_x = f'select distinct xcen from "{self.cfg.domain.case_schema}"."{self.cfg.tables.grid}" order by xcen'
         res_x = self.execute(sql_x)
         x1d = [x[0] - self.cfg.domain.origin_x for x in res_x]
@@ -352,14 +354,13 @@ class StaticDriverGen(BaseTask):
             temp_dim = self.ncfile.createVariable(name, 'i', (name,))
             temp_dim[:] = np.arange(d_len)
 
-    def write_type_variable(self, vn, vln, vt, fill, lod, sql_query=None, params=None):
+    def write_type_variable(self, vn, vln, vt, fill, lod, sql_query=None, params=None, units=''):
         """
         standardized helper to create and fill a 2d netcdf classification variable.
         can take an optional sql_query to fetch results, or assume results are ready.
         """
         # execute query if provided, otherwise assume results are available from the last execute
         if sql_query:
-            # sql_query is expected to be strictly lower case from the caller
             res_raw = self.execute(sql_query, params)
         else:
             raise ValueError(f"write_type_variable: sql_query is required for variable '{vn}'")
@@ -388,7 +389,7 @@ class StaticDriverGen(BaseTask):
 
         # write standard attributes
         self.nc_write_attribute(vn, 'long_name', vln)
-        self.nc_write_attribute(vn, 'units', '')
+        self.nc_write_attribute(vn, 'units', units)
         self.nc_write_attribute(vn, 'res_orig', self.cfg.domain.dz)
 
         if lod is not None and lod != '' and lod != 0:
@@ -414,7 +415,6 @@ class StaticDriverGen(BaseTask):
 
         nesting_adjust = ceil((self.cfg.domain.oro_min - self.cfg.domain.origin_z) / self.cfg.domain.dz)
 
-        # sql query is strictly lower case
         sql_topo = f'select (nz + %s) * %s from "{self.cfg.domain.case_schema}"."{self.cfg.tables.grid}" order by j, i'
 
         # execute via task system
@@ -484,7 +484,6 @@ class StaticDriverGen(BaseTask):
         for it, col_name in fractions:
             verbose(f'Processing fraction index {it}: {col_name}')
 
-            # sql query is strictly lower case
             sql_frac = f"""
                 select 
                     case when g.{col_name} > 0.0 then g.{col_name} else 0.0 end 
@@ -632,7 +631,6 @@ class StaticDriverGen(BaseTask):
 
         # 1. process water surface types
         if self.cfg.landcover.surface_fractions:
-            # sql query is strictly lower case
             sql_type = f"""
                 select 
                     case when g.wat_fraction > %s and g.wat_fract_type is not null 
@@ -721,7 +719,6 @@ class StaticDriverGen(BaseTask):
 
         # 1. process vegetation surface types
         if self.cfg.landcover.surface_fractions:
-            # sql query is strictly lower case
             sql_type = f"""
                 select 
                     case when g.veg_fraction > %s and g.veg_fract_type is not null 
@@ -748,7 +745,7 @@ class StaticDriverGen(BaseTask):
                 self.cfg.type_range.vegetation_max
             )
 
-        # helper handles variable creation and filling
+        # write_type_variable creates and fills the variable
         self.write_type_variable(vn, 'vegetation type', vt_b, self.cfg.fill_values, 0, sql_query=sql_type,
                                  params=params)
 
@@ -806,7 +803,6 @@ class StaticDriverGen(BaseTask):
         vt_b = 'b'
 
         # 1. process soil types
-        # sql query is strictly lower case
         sql_soil = f"""
             select 
                 case when l.type is not null then %s else null end 
@@ -824,7 +820,7 @@ class StaticDriverGen(BaseTask):
             self.cfg.type_range.pavement_min, self.cfg.type_range.pavement_max
         )
 
-        # helper handles variable creation and filling
+        # write_type_variable creates and fills the variable
         self.write_type_variable(vn, 'soil type', vt_b, self.cfg.fill_values, 1, sql_query=sql_soil, params=params)
 
         if self.cfg.visual_check.enabled:
@@ -845,7 +841,7 @@ class StaticDriverGen(BaseTask):
         #     vn_sm = 'soil_moisture_adjust'
         #     vt_f4 = 'f4'
         #
-        #     # construct calculation formula via strictly lower case sql
+        #     # construct calculation formula
         #     sm_text = 'case '
         #     for lc in self.cfg.soil_moisture_adjust._settings:
         #         sm_text += f'when l."{self.cfg.landcover_params_var}" = {lc} then {self.cfg.soil_moisture_adjust._settings[lc]} '
@@ -894,7 +890,7 @@ class StaticDriverGen(BaseTask):
             order by g.j, g.i
         """
         self.write_type_variable('buildings_2d', 'buildings_2d', 'f4', self.cfg.fill_values, 1,
-                                 sql_query=sql_h, params=(self.cfg.domain.dz,))
+                                 sql_query=sql_h, params=(self.cfg.domain.dz,), units='m')
 
         # 3. building_type
         sql_type = f"""
@@ -930,6 +926,8 @@ class StaticDriverGen(BaseTask):
         vn_3d = 'buildings_3d'
         vt_b = 'b'
         var_nc_3d = self.ncfile.createVariable(vn_3d, vt_b, ('z', 'y', 'x'), fill_value=self.cfg.fill_values[vt_b])
+        self.nc_write_attribute(vn_3d, 'long_name', 'buildings_3d')
+        self.nc_write_attribute(vn_3d, 'units', '1')
         self.nc_write_attribute(vn_3d, 'flag_meanings', 'no building, building')
         self.nc_write_attribute(vn_3d, 'lod', 2)
 
@@ -1055,8 +1053,19 @@ class StaticDriverGen(BaseTask):
         writes lad and bad fields into netcdf based on canopy parameters from the grid table.
         calculates vertical distribution using a database-side least/greatest formula.
         """
+        # 0. the lai task adds canopy_height to the grid only when the LAI and
+        # canopy rasters exist; in a staged driver-only run without them the
+        # column is absent, which is the same as "no canopy data"
+        has_column = self.fetchone(
+            "select exists(select 1 from information_schema.columns "
+            "where table_schema = %s and table_name = %s and column_name = 'canopy_height')",
+            (self.cfg.domain.case_schema, self.cfg.tables.grid))
+        if not has_column:
+            debug("Grid has no canopy_height column (lai not run or no LAI inputs). "
+                  "Skipping lad_grid generation.")
+            return True
+
         # 1. determine max canopy height to define the vertical dimension
-        # sql query is strictly lower case
         sql_max_h = f'select max(canopy_height) from "{self.cfg.domain.case_schema}"."{self.cfg.tables.grid}"'
         ret = self.execute(sql_max_h)
 
@@ -1087,7 +1096,6 @@ class StaticDriverGen(BaseTask):
             z_center = (nz - 0.5) * self.cfg.domain.dz
             dz = self.cfg.domain.dz
 
-            # sql query is strictly lower case
             # formula: calculates density based on lai/height ratio and vertical overlap
             sql_layer = f""" 
                 select 
@@ -1118,7 +1126,6 @@ class StaticDriverGen(BaseTask):
         """
 
         # 1. determine max height to define vertical grid size
-        # sql query is strictly lower case
         sql_max_h = f'select max(treeh) from "{self.cfg.domain.case_schema}"."{self.cfg.tables.trees}"'
         ret = self.execute(sql_max_h)
 
@@ -1135,7 +1142,6 @@ class StaticDriverGen(BaseTask):
         bad_local = np.zeros((nzlad, ny, nx), dtype=vt)
 
         # 2. construct dynamic query for all lad/bad layers
-        # sql query is strictly lower case
         cols = ['i', 'j']
         for l in range(nzlad):
             cols.append(f'lad_{l}')
@@ -1224,7 +1230,7 @@ class StaticDriverGen(BaseTask):
         for par, rad_type, build_case in pars:
             debug(f"processing albedo pars from config {par}, {rad_type}, {build_case}")
 
-            # start case statement - sql must be lower case
+            # start case statement
             sql_case = 'case '
 
             # vegetation albedos
@@ -1253,7 +1259,7 @@ class StaticDriverGen(BaseTask):
 
             sql_case += 'else 0 end'
 
-            # final sql query in lower case
+            # final sql query
             sql_albedo = f"""
                 select 
                     distinct on (g.i, g.j) 
@@ -1302,7 +1308,6 @@ class StaticDriverGen(BaseTask):
         debug('Testing buildings insulation fields in database schema')
 
         for f in self.cfg.insulation.fields:
-            # sql query is strictly lower case
             sql_check = """
                 select exists (
                     select 1 from information_schema.columns 
@@ -1372,7 +1377,7 @@ class StaticDriverGen(BaseTask):
         for par in self.cfg.building_pars._settings.keys():
             extra_verbose(f'Processing buildings pars, par index: {par}')
 
-            # 1. handle green fraction replacements (sql must be lower case)
+            # 1. handle green fraction replacements
             if par in self.cfg.building_pars_repl._settings.keys():
                 repl = self.cfg.building_pars_repl[par]
                 g_text = 'case '
@@ -1382,7 +1387,7 @@ class StaticDriverGen(BaseTask):
             else:
                 g_text = f'{self.cfg.building_pars[par]} '
 
-            # 2. handle insulation logic (sql must be lower case)
+            # 2. handle insulation logic
             if self.cfg.insulation.enabled and par in self.cfg.insulation.building_pars:
                 idx = self.cfg.insulation.building_pars.index(par)
                 field_exists = self.cfg.insulation.exists[self.cfg.insulation.pars_fields[idx]]
@@ -1396,7 +1401,7 @@ class StaticDriverGen(BaseTask):
             else:
                 i_text = f'{g_text} '
 
-            # 3. construct final sql query (strictly lower case)
+            # 3. construct final sql query
             p_text = f'case when b.id is not null then {i_text} else null end'
 
             sql_building = f"""
@@ -1539,7 +1544,6 @@ class StaticDriverGen(BaseTask):
         case_schema = self.cfg.domain.case_schema
 
         # 1. acquire surface ids and create 's' dimension
-        # sql query is strictly lower case
         sql_sid = f"""
             select sid from "{case_schema}"."{self.cfg.tables.surfaces}" as s 
             left outer join "{case_schema}"."{self.cfg.tables.grid}" as g on g.id = s.gid 
@@ -1584,9 +1588,18 @@ class StaticDriverGen(BaseTask):
         self.nc_write_attribute(vn_sp, 'long_name', 'building parameters')
         self.nc_write_attribute(vn_sp, 'coordinates', 'Es_UTM Ns_UTM lons lats')
 
-        # 4. fill individual parameters based on configuration
+        # 4. fill individual parameters based on configuration. vtabs exists
+        # only when initialize_domain ran in this process; a staged driver-only
+        # run checks the case schema instead
+        vtabs = self.cfg.get('vtabs')
+        if vtabs is not None:
+            has_extras = self.cfg.tables.extras_shp in vtabs
+        else:
+            has_extras = bool(self.fetchone(
+                "select exists(select 1 from information_schema.tables "
+                "where table_schema = %s and table_name = %s)",
+                (self.cfg.domain.case_schema, self.cfg.tables.extras_shp)))
         for par in self.cfg.building_surface_pars._settings.keys():
-            has_extras = self.cfg.tables.extras_shp in self.cfg.vtabs
             p_configs = self.cfg.building_surface_pars[par]
 
             # normalize parameter lists
@@ -1594,7 +1607,7 @@ class StaticDriverGen(BaseTask):
                 p_configs = [p_configs] * (5 if has_extras else 3)
             pt_keys = ['pr', 'pg', 'pu', 'pd', 'b'] if has_extras else ['pr', 'pg', 'pu']
 
-            # generate case logic for green fractions and insulation (sql lower case)
+            # generate case logic for green fractions and insulation
             g_text_map = {}
             for pk, p_val in enumerate(p_configs):
                 if par in self.cfg.building_surface_pars_repl._settings.keys():
@@ -1615,7 +1628,7 @@ class StaticDriverGen(BaseTask):
                         i_val = self.cfg.insulation.values[self.cfg.insulation.surface_pars_items[ins_idx]]
                         g_text_map[pk] = f'case when "{f_name}" <> 0 then {i_val} else {g_text_map[pk]} end '
 
-            # 5. build final selection logic (sql lower case)
+            # 5. build final selection logic
             if has_extras:
                 p_text = f"""
                     case when s.isroof then 
@@ -1642,7 +1655,7 @@ class StaticDriverGen(BaseTask):
                 """
                 extra_joins = ""
 
-            # main surface parameter query (strictly lower case)
+            # main surface parameter query
             sql_final = f"""
                 select {p_text} from "{case_schema}"."{self.cfg.tables.surfaces}" s 
                 left outer join "{case_schema}"."{self.cfg.tables.roofs}" r on r.{self.cfg.idx.roofs} = s.rid 
@@ -1699,29 +1712,35 @@ class StaticDriverGen(BaseTask):
         for par in self.cfg.albedo_pars._settings.keys():
             debug(f'Processing albedo parameter: {par}')
 
-            # 1. check if albedo column exists in the landcover table (sql lower case)
+            # 1. check if albedo column exists in the landcover table;
+            # the formulas reference it as l.<column>, so the probe needs the l alias
+            # (without it the probe always failed and the landcover value was never used)
             al_col = self.cfg.albedo_pars[par][0]
-            sql_check = f'select {al_col} from "{self.cfg.domain.case_schema}"."{self.cfg.tables.landcover}" limit 1'
+            # checked via information_schema instead of a failing probe query,
+            # which logged an alarming SQL ERROR for an expected outcome
+            needed = set(re.findall(r'\bl\.(\w+)', al_col))
+            have = {r[0] for r in self.fetch(
+                "select column_name from information_schema.columns "
+                "where table_schema = %s and table_name = %s",
+                (self.cfg.domain.case_schema, self.cfg.tables.landcover))}
+            al4l = al_col if needed and needed <= have else 'null'
+            if al4l == 'null':
+                debug(f'albedo_pars {par}: landcover has no {sorted(needed - have)}; using fill')
 
-            try:
-                self.execute(sql_check)
-                al4l = al_col
-            except Exception:
-                al4l = 'null'
-
-            # 2. process land and roof albedo (sql lower case)
+            # 2. process land and roof albedo
             sql_land_roof = f"""
                 select case when b.id is null then {al4l} else {self.cfg.albedo_pars[par][1]} end 
                 from "{self.cfg.domain.case_schema}"."{self.cfg.tables.grid}" g 
                 left outer join "{self.cfg.domain.case_schema}"."{self.cfg.tables.landcover}" l on l.lid = g.lid 
                 left outer join "{self.cfg.domain.case_schema}"."{self.cfg.tables.buildings_grid}" b on b.id = g.id 
-                left outer join "{self.cfg.domain.case_schema}"."{self.cfg.tables.roofs}" r on r.{self.cfg.idx.roofs} = b.rid 
+                left outer join "{self.cfg.domain.case_schema}"."{self.cfg.tables.roofs}" r on r.{self.cfg.idx.roofs} = b.rid
+                left outer join "{self.cfg.domain.case_schema}"."{self.cfg.tables.surface_params}" pr on pr.code = cast(r.material as integer) + {self.cfg.surf_range.roof_min}
                 order by g.j, g.i
             """
             res_land = self.execute(sql_land_roof)
             var_arr = np.reshape(np.asarray([x[0] for x in res_land], dtype=vt), (ny, nx))
 
-            # 3. process wall albedo (sql lower case)
+            # 3. process wall albedo
             sql_wall = f"""
                 select distinct on (g.i, g.j) 
                     case when bw.id is not null then {self.cfg.albedo_pars[par][2]} else null end 
@@ -1765,7 +1784,6 @@ class StaticDriverGen(BaseTask):
         fetches physical parameters for buildings by joining grid, roof, and wall datasets.
         uses a database-side case statement to resolve properties based on material codes.
         """
-        # sql query is strictly lower case
         # joins grid to building geometry and material-specific parameter tables
         sql_fetch = f"""
             select 
@@ -1822,8 +1840,11 @@ class StaticDriverGen(BaseTask):
         progress('Masking buildings for slurb')
         ny, nx = self.cfg.domain.ny, self.cfg.domain.nx
 
+        if not self.cfg.get('slurb_lsm_bare_soil', False):
+            return self._write_slurb_lsm_surface()
+
+        # legacy (slurb_lsm_bare_soil): building cells become bare soil
         # 1. query the building presence mask
-        # sql query is strictly lower case
         sql_mask = f"""
             select case when b.lid is not null then true else false end 
             from "{self.cfg.domain.case_schema}"."{self.cfg.tables.grid}" g 
@@ -1854,6 +1875,130 @@ class StaticDriverGen(BaseTask):
 
         debug('SLURB building mask successfully applied.')
         return True
+
+    def _write_slurb_lsm_surface(self):
+        """Land surface of SLUrb cells for the static driver.
+
+        PALM-SLUrb models the urban part of a cell (buildings + streets) and
+        PALM-LSM the remainder, which the static driver must describe with the
+        dominant *non-urban* surface of the cell (vegetation or water; the
+        SLUrb guide's example is short grass). SLUrb cells are the cells the
+        SLURB driver covers: building plan fraction >= min_plan_area. Cells
+        outside keep their real LSM type untouched.
+        """
+        tr = self.cfg.type_range
+
+        # same SLUrb mask as the SLURB driver: building plan fraction over the
+        # reference window (per cell when the window is 1); the
+        # dominant non-urban type is taken over the same window
+        n = window_cells(self.cfg)
+        plan = self._slurb_cell_plan()
+        # cap per cell exactly like create_slurb_vars (least(0.988, ...)) so
+        # both drivers draw the same SLUrb mask at the min_plan_area threshold
+        plan = np.minimum(plan, 0.988)
+        urban = np.minimum(box_mean(plan, n), 0.988) >= self.cfg.min_plan_area
+        # only cells within half a window of a SLUrb cell can influence its
+        # dominant non-urban type
+        near = box_sum(urban.astype(float), n) > 0
+        type_areas = self._slurb_cell_type_areas(near)
+        types, found = dominant_type(type_areas, n)
+
+        default_type = int(self.cfg.get('slurb_lsm_default_type', 103))
+        if types is None:
+            types, found = np.zeros(plan.shape, dtype='i4'), np.zeros(plan.shape, dtype=bool)
+        lc_type = np.where(found, types, default_type).astype('i4')
+        is_water = urban & (lc_type >= tr.water_min) & (lc_type <= tr.water_max)
+        is_veg = urban & ~is_water
+
+        # np.ma.asarray: netCDF4 hands back a plain ndarray when a variable has
+        # no fill values, and plain arrays cannot take np.ma.masked
+        v = self.ncfile.variables
+        veg = np.ma.asarray(v['vegetation_type'][:, :])
+        pav = np.ma.asarray(v['pavement_type'][:, :])
+        wat = np.ma.asarray(v['water_type'][:, :])
+        soil = np.ma.asarray(v['soil_type'][:, :])
+
+        # exactly one LSM type per SLUrb cell: the dominant non-urban one
+        veg[is_veg] = lc_type[is_veg] - tr.vegetation_min
+        veg[is_water] = np.ma.masked
+        wat[is_water] = lc_type[is_water] - tr.water_min
+        wat[is_veg] = np.ma.masked
+        pav[urban] = np.ma.masked
+        soil[is_water] = np.ma.masked      # no soil under water; check_consistency
+                                           # adds the default soil under vegetation
+        v['vegetation_type'][:, :] = veg
+        v['pavement_type'][:, :] = pav
+        v['water_type'][:, :] = wat
+        v['soil_type'][:, :] = soil
+
+        if self.cfg.landcover.surface_fractions and 'surface_fraction' in v:
+            sf = v['surface_fraction'][:, :, :]
+            sf[0, urban] = np.where(is_veg[urban], 1.0, 0.0)    # vegetation
+            sf[1, urban] = 0.0                                  # pavement
+            sf[2, urban] = np.where(is_water[urban], 1.0, 0.0)  # water
+            v['surface_fraction'][:, :, :] = sf
+
+        n_default = int((urban & ~found).sum())
+        progress('SLUrb cells: {} ({} vegetation, {} water, {} without non-urban '
+                 'surface -> default type {}; reference window {} cell(s))',
+                 int(urban.sum()), int(is_veg.sum()), int(is_water.sum()), n_default,
+                 default_type, n)
+        return True
+
+    def _grid_origin_ij(self):
+        """Smallest grid i, j (array index = j - j0, i - i0)."""
+        return self.execute(
+            f'select min(i), min(j) from "{self.cfg.domain.case_schema}"."{self.cfg.tables.grid}"')[0]
+
+    def _slurb_cell_plan(self):
+        """Building plan fraction per cell as a (ny, nx) array in grid order."""
+        ny, nx = self.cfg.domain.ny, self.cfg.domain.nx
+        schema = self.cfg.domain.case_schema
+        tr = self.cfg.type_range
+        i0, j0 = self._grid_origin_ij()
+
+        # building filter inside the join: intersecting every landcover polygon
+        # (large fields included) and filtering afterwards is ~20x slower
+        rows = self.execute(f"""
+            select g.i, g.j, sum(st_area(st_intersection(g.geom, l.geom))) / %s
+            from "{schema}"."{self.cfg.tables.grid}" g
+            join "{schema}"."{self.cfg.tables.landcover}" l
+                on st_intersects(l.geom, g.geom) and l.type between %s and %s
+            group by g.i, g.j
+        """, (self.cfg.domain.dx * self.cfg.domain.dy, tr.building_min, tr.building_max))
+        plan = np.zeros((ny, nx))
+        for i, j, f in rows:
+            plan[j - j0, i - i0] = f
+        return plan
+
+    def _slurb_cell_type_areas(self, cells):
+        """Area of every non-urban (vegetation/water) landcover type within
+        the cells selected by the boolean (ny, nx) mask ``cells``, as
+        {type: (ny, nx) area array}."""
+        ny, nx = self.cfg.domain.ny, self.cfg.domain.nx
+        schema = self.cfg.domain.case_schema
+        tr = self.cfg.type_range
+        i0, j0 = self._grid_origin_ij()
+        if not cells.any():
+            return {}
+        jj, ii = np.nonzero(cells)
+
+        type_areas = {}
+        # a polygon covering the whole cell contributes the cell area; this
+        # skips the expensive intersection inside large fields and forests
+        for i, j, t, a in self.execute(f"""
+            select g.i, g.j, l.type,
+                   sum(case when st_covers(l.geom, g.geom) then st_area(g.geom)
+                            else st_area(st_intersection(g.geom, l.geom)) end)
+            from "{schema}"."{self.cfg.tables.grid}" g
+            join unnest(%s::int[], %s::int[]) as c(i, j) on c.i = g.i and c.j = g.j
+            join "{schema}"."{self.cfg.tables.landcover}" l on st_intersects(l.geom, g.geom)
+            where l.type between %s and %s or l.type between %s and %s
+            group by g.i, g.j, l.type
+        """, ([int(x) + i0 for x in ii], [int(y) + j0 for y in jj],
+              tr.vegetation_min, tr.vegetation_max, tr.water_min, tr.water_max)):
+            type_areas.setdefault(t, np.zeros((ny, nx)))[j - j0, i - i0] = a
+        return type_areas
 
     def check_consistency(self):
         """
@@ -1910,6 +2055,28 @@ class StaticDriverGen(BaseTask):
             st[soil_mask] = soil_def
             self.ncfile.variables['soil_type'][:, :] = st
 
+        # 2b. pavement_pars / pavement_subsurface_pars consistency: where a cell has
+        # pavement_pars[2] but no pavement_pars[0], the pars come from an
+        # incomplete surface_params match — mask the cell in both variables
+        if 'pavement_pars' in self.ncfile.variables:
+            pp = self.ncfile.variables['pavement_pars']
+            pp_mask = np.logical_and(~np.ma.getmaskarray(pp[2, :, :]),
+                                     np.ma.getmaskarray(pp[0, :, :]))
+            if np.any(pp_mask):
+                warning('In some places, pavement_pars is not defined, while subpavement pars are. '
+                        'Double check katland and type (especially condition katland=99 and type<900)')
+                debug('Correct the issue masking all those values in pavement_pars and pavement_subsurface_pars')
+                verbose('Problematic grid points: {}', np.argwhere(pp_mask).tolist())
+                fill = self.cfg.fill_values.f4
+                vals = pp[...]
+                vals[:, pp_mask] = fill
+                pp[...] = vals
+                if 'pavement_subsurface_pars' in self.ncfile.variables:
+                    ps = self.ncfile.variables['pavement_subsurface_pars']
+                    vals = ps[...]
+                    vals[:, :, pp_mask] = fill
+                    ps[...] = vals
+
         # 3. physical boundary and NaN checking
         # loops through all variables to find outliers or corrupted values
         for var_name in self.ncfile.variables.keys():
@@ -1932,8 +2099,11 @@ class StaticDriverGen(BaseTask):
             # boundary check logic
             if has_bound:
                 bounds = self.cfg[bound_key]
-                # determine number of parameters (e.g., albedo_pars has 4)
-                npars = nc_var.shape[0] if len(nc_var.shape) > 2 else 1
+                # determine number of parameters (e.g., albedo_pars has 4). The
+                # parameter dimension is the leading n* one; building_surface_pars
+                # is only 2-d (nbuilding_surface_pars, s), so a rank test alone
+                # pooled all its parameters under the bounds of parameter 0
+                npars = nc_var.shape[0] if len(nc_var.shape) >= 2 and nc_var.dimensions[0].startswith('n') else 1
 
                 for ipar in range(npars):
                     min_b, max_b, sub_name = bounds[ipar]
@@ -1990,7 +2160,6 @@ class SlurbDriverGen(StaticDriverGen):
         calculates local x and y coordinates relative to the domain origin.
         """
         # 1. fetch distinct x and y coordinates from the grid table
-        # sql queries are strictly lower case
         sql_x = f'select distinct xcen from "{self.cfg.domain.case_schema}"."{self.cfg.tables.grid}" order by xcen'
         res_x = self.execute(sql_x)
         x1d = [x[0] - self.cfg.domain.origin_x for x in res_x]
@@ -2043,7 +2212,7 @@ class SlurbDriverGen(StaticDriverGen):
         ny, nx = self.cfg.domain.ny, self.cfg.domain.nx
         schema = self.cfg.domain.case_schema
 
-        # 1. create the slurb grid table (sql lower case)
+        # 1. create the slurb grid table
         sql_init = f"""
             drop table if exists "{schema}"."{self.cfg.tables.grid_slurb}";
             create table "{schema}"."{self.cfg.tables.grid_slurb}" as 
@@ -2070,7 +2239,7 @@ class SlurbDriverGen(StaticDriverGen):
         """
         self.execute(sql_init)
 
-        # 2. calculate building and urban fractions (sql lower case)
+        # 2. calculate building and urban fractions
         area_factor = self.cfg.domain.dx * self.cfg.domain.dy
 
         sql_fractions = f"""
@@ -2096,9 +2265,13 @@ class SlurbDriverGen(StaticDriverGen):
         """
         self.execute(sql_fractions)
 
-        # delete cells with negligible building fraction
+        # delete cells with negligible building fraction. With a reference
+        # window the decision is taken on the windowed fraction, so all
+        # cells stay until _apply_slurb_window has averaged them.
+        window_n = window_cells(self.cfg)
         sql_cleanup = f'delete from "{schema}"."{self.cfg.tables.grid_slurb}" where building_plan_area_fraction < {self.cfg.min_plan_area}'
-        self.execute(sql_cleanup)
+        if window_n == 1:
+            self.execute(sql_cleanup)
 
         # 3. process building geometries (height, frontal area, canyon orientation)
         if self.cfg.has_buildings:
@@ -2112,91 +2285,290 @@ class SlurbDriverGen(StaticDriverGen):
                         from "{schema}"."{self.cfg.tables.buildings_height}"
                         where st_intersects(rast, gs.geom)
                     ) a on true
+                    -- only cells holding buildings carry a height (window
+                    -- mode keeps building-free cells; per-cell mode has
+                    -- already removed them)
+                    where gs.building_plan_area_fraction > 0
                 )
-                update "{schema}"."{self.cfg.tables.grid_slurb}" gs 
+                update "{schema}"."{self.cfg.tables.grid_slurb}" gs
                 set building_height = gh.height from grid_height gh
                 where gh.id = gs.id and gh.height is not null
             """
             self.execute(sql_height)
 
-        # frontal area fraction (sql lower case)
+        # frontal area fraction: building frontal area / cell plan area.
+        # Each building's facade area (wall_area = exterior perimeter x height,
+        # from prepare_slurb) is shared out to cells by footprint overlap and
+        # projected to a frontal area with frontal_area_factor; the default 1/pi
+        # is the wind-direction average for convex buildings (Cauchy: mean
+        # projected width = perimeter / pi). The roof area used to be added to
+        # the facade area, which pushed most cells to the 0.99 cap.
+        frontal_factor = float(self.cfg.get('frontal_area_factor', 1.0 / pi))
         sql_frontal = f"""
             with fraction as (
-                select gs.id, sum(st_area(st_intersection(ba.geom, gs.geom)) / ba.roof_area * (wall_area + roof_area) / {area_factor}) as f_area
+                select gs.id, sum(st_area(st_intersection(ba.geom, gs.geom)) / ba.roof_area * ba.wall_area)
+                              * %s / {area_factor} as f_area
                 from "{schema}"."{self.cfg.tables.grid_slurb}" gs
-                join "{schema}"."{self.cfg.tables.building_area}" ba on st_intersects(ba.geom, gs.geom) 
+                join "{schema}"."{self.cfg.tables.building_area}" ba on st_intersects(ba.geom, gs.geom)
+                where ba.roof_area > 0
                 group by gs.id
             )
             update "{schema}"."{self.cfg.tables.grid_slurb}" gs set building_frontal_area_fraction = least(f.f_area, 0.99)
             from fraction f where f.id = gs.id
         """
-        self.execute(sql_frontal)
+        self.execute(sql_frontal, (frontal_factor,))
 
-        # 4. street canyon aspect ratio and orientation
-        sql_canyon = f"""
-            with subq as (
-                select gs.id, a.hw, a.orientation
+        # average the morphology over the reference window, then drop the
+        # cells whose windowed plan fraction is below min_plan_area
+        if window_n > 1:
+            self._apply_slurb_window(window_n)
+            self.execute(sql_cleanup)
+
+        n_capped = self.fetchone(
+            f'select count(*) from "{schema}"."{self.cfg.tables.grid_slurb}" '
+            f'where building_frontal_area_fraction >= 0.99')
+        if n_capped:
+            warning(f'{n_capped} urban cell(s) reached the 0.99 cap of building_frontal_area_fraction')
+
+        # 3b. building type: median landcover building type (9xx - building_min)
+        # in the cell, nearest SLUrb cell where the cell holds no building
+        self.execute(f'update "{schema}"."{self.cfg.tables.grid_slurb}" set building_type = null')
+        self.execute(f"""
+            with grid_type as (
+                select gs.id, a.g_type - %s as g_type
                 from "{schema}"."{self.cfg.tables.grid_slurb}" gs
                 join lateral (
-                    select 
-                        avg(((c.val_1 + c.val_2) / 2) / c.width) as hw,
-                        atan2(avg(sin(orientation * pi() / 180.0)), avg(cos(orientation * pi() / 180.0))) * 180.0 / pi() as orientation
-                    from "{schema}"."{self.cfg.tables.centerline}" c where st_intersects(c.geom, gs.geom)
+                    select percentile_cont(0.5) within group (order by l.type) as g_type
+                    from "{schema}"."{self.cfg.tables.landcover}" l
+                    where st_intersects(l.geom, gs.geom) and l.type between %s and %s
                 ) a on true
+                where a.g_type is not null
             )
-            update "{schema}"."{self.cfg.tables.grid_slurb}" gs 
+            update "{schema}"."{self.cfg.tables.grid_slurb}" gs
+            set building_type = round(gt.g_type)
+            from grid_type gt where gt.id = gs.id
+        """, (self.cfg.type_range.building_min, self.cfg.type_range.building_min,
+              self.cfg.type_range.building_max))
+        self.execute(f"""
+            update "{schema}"."{self.cfg.tables.grid_slurb}" gs
+            set building_type = (
+                select gss.building_type from "{schema}"."{self.cfg.tables.grid_slurb}" gss
+                where gss.building_type is not null
+                order by gss.geom <-> gs.geom limit 1)
+            where gs.building_type is null
+        """)
+
+        # 4. street canyon aspect ratio and orientation
+        # canyon samples are points on the street centre line, so they lie in
+        # street cells, which step 2 already removed from grid_slurb; requiring
+        # the point inside the urban cell left ~97 % of urban cells without a
+        # canyon. Each urban cell instead takes its nearest samples within the
+        # search radius (the probe length prepare_slurb measures canyons with).
+        # Orientation is an axis (theta and theta+180 are the same street), so
+        # it is averaged on doubled angles and reported in [0, 180).
+        sql_canyon = f"""
+            with near as (
+                select gs.id, c.val_1, c.val_2, c.width, c.orientation
+                from "{schema}"."{self.cfg.tables.grid_slurb}" gs
+                cross join lateral (
+                    select c.val_1, c.val_2, c.width, c.orientation
+                    from "{schema}"."{self.cfg.tables.centerline}" c
+                    where st_dwithin(c.geom, gs.geom, %s) and c.width > 0
+                    order by c.geom <-> gs.point
+                    limit %s
+                ) c
+            ),
+            subq as (
+                select id,
+                       avg(((val_1 + val_2) / 2) / width) as hw,
+                       degrees(atan2(avg(sin(2.0 * radians(orientation))),
+                                     avg(cos(2.0 * radians(orientation))))) / 2.0 as orientation
+                from near
+                group by id
+            )
+            update "{schema}"."{self.cfg.tables.grid_slurb}" gs
             set street_canyon_aspect_ratio = s.hw,
-                street_canyon_orientation = case 
-                    when s.orientation < 0.0 then s.orientation + 360.0
-                    when s.orientation > 360.0 then s.orientation - 360.0
+                street_canyon_orientation = case
+                    when s.orientation < 0.0 then s.orientation + 180.0
                     else s.orientation end
             from subq s where s.id = gs.id
         """
-        self.execute(sql_canyon)
+        self.execute(sql_canyon, (float(self.cfg.canyon_search_radius),
+                                  int(self.cfg.canyon_neighbours)))
+
+        # urban cells without a canyon sample within the radius take the aspect
+        # ratio of the nearest cell that has one. The orientation is NOT filled
+        # this way: without a nearby street direction it stays isotropic.
+        n_missing = self.fetchone(
+            f'select count(*) from "{schema}"."{self.cfg.tables.grid_slurb}" '
+            f'where street_canyon_aspect_ratio is null')
+        if n_missing:
+            self.execute(f"""
+                update "{schema}"."{self.cfg.tables.grid_slurb}" gs
+                set street_canyon_aspect_ratio = (
+                    select gss.street_canyon_aspect_ratio
+                    from "{schema}"."{self.cfg.tables.grid_slurb}" gss
+                    where gss.street_canyon_aspect_ratio is not null
+                    order by gss.geom <-> gs.geom limit 1)
+                where gs.street_canyon_aspect_ratio is null
+            """)
+            verbose(f'{n_missing} urban cell(s) without a canyon sample within '
+                    f'{self.cfg.canyon_search_radius} m took the nearest cell\'s aspect ratio')
+
+        self._apply_canyon_coherence()
 
         # 5. insert variables into netcdf
         progress('Inserting SLURB variables into NetCDF')
         for vn in self.cfg.slurb_vars_done:
             var_cfg = self.cfg.slurb_vars[vn]
             sql_fetch = f'select sg.{vn} from "{schema}"."{self.cfg.tables.grid}" g left join "{schema}"."{self.cfg.tables.grid_slurb}" sg on sg.id = g.id order by g.j, g.i'
-            self.write_type_variable(vn, var_cfg.long_name, var_cfg.vt, self.cfg.fill_values, 0, sql_query=sql_fetch)
+            self.write_type_variable(vn, var_cfg.long_name, var_cfg.vt, self.cfg.fill_values, 0,
+                                     sql_query=sql_fetch, units=var_cfg.get('units', ''))
 
-        # 6. create 3d multi-layer variables (road, roof, wall, window)
-        slurb_layers = [
-            ('road', 'nroad_3d'), ('roof', 'nroof_3d'),
-            ('wall', 'nwall_3d'), ('window', 'nwin_3d')
-        ]
-
-        # fetch slurb mask for efficient numpy operations
-        sql_mask = f'select case when sg.id is not null then true else false end from "{schema}"."{self.cfg.tables.grid}" g left join "{schema}"."{self.cfg.tables.grid_slurb}" sg on sg.id = g.id order by g.j, g.i'
-        mask_res = self.execute(sql_mask)
-        slurb_mask = np.reshape(np.asarray([x[0] for x in mask_res], dtype='bool_'), (ny, nx))
-
-        for suffix, dim_name in slurb_layers:
-            for prefix in ['c_', 'dz_', 'lambda_']:
-                vn = f"{prefix}{suffix}"
-                v_cfg = self.cfg.slurb_vars[vn]
-
-                # create variable with 3d dimension (layer, y, x)
-                self.ncfile.createVariable(vn, v_cfg.vt, (dim_name, 'y', 'x'),
-                                           fill_value=self.cfg.fill_values[v_cfg.vt])
-
-                # prepare data slice
-                fill_val = self.cfg.slurb_vars_defaults.get(vn, 0.5)  # simplified default handling
-                data_slice = np.full((ny, nx), self.cfg.fill_values[v_cfg.vt], dtype=v_cfg.vt)
-                data_slice[slurb_mask] = fill_val
-
-                # fill all layers
-                for i in range(self.cfg.ndims_slurb[dim_name]):
-                    self.ncfile.variables[vn][i, :, :] = data_slice
-
-                self.nc_write_attribute(vn, 'long_name', self.cfg.slurb_vars[vn].long_name)
-                self.nc_write_attribute(vn, 'units', self.cfg.slurb_vars[vn].units)
-                self.nc_write_attribute(vn, 'res_orig', self.cfg.domain.dz)
-                self.nc_write_attribute(vn, 'grid_mapping', 'crs')
-                self.nc_write_attribute(vn, 'coordinates', 'E_UTM N_UTM lon lat')
+        # 6. 3d multi-layer variables (road, roof, wall, window) — DISABLED:
+        # these were filled entirely from hardcoded defaults, not from
+        # any input source (and the flat slurb_vars_defaults lookup never found
+        # the nested road/roof/wall/window values, so heat capacity ended up as
+        # the 0.5 fallback). Only input-derived variables are written; re-enable
+        # this block once detailed material inputs are handled, mapping the
+        # prefixes onto the nested slurb_vars_defaults (c_road ->
+        # defaults.road.c, per-layer dz from the dz list, ...).
+        #
+        # slurb_layers = [
+        #     ('road', 'nroad_3d'), ('roof', 'nroof_3d'),
+        #     ('wall', 'nwall_3d'), ('window', 'nwin_3d')
+        # ]
+        #
+        # # fetch slurb mask for efficient numpy operations
+        # sql_mask = f'select case when sg.id is not null then true else false end from "{schema}"."{self.cfg.tables.grid}" g left join "{schema}"."{self.cfg.tables.grid_slurb}" sg on sg.id = g.id order by g.j, g.i'
+        # mask_res = self.execute(sql_mask)
+        # slurb_mask = np.reshape(np.asarray([x[0] for x in mask_res], dtype='bool_'), (ny, nx))
+        #
+        # for suffix, dim_name in slurb_layers:
+        #     for prefix in ['c_', 'dz_', 'lambda_']:
+        #         vn = f"{prefix}{suffix}"
+        #         v_cfg = self.cfg.slurb_vars[vn]
+        #
+        #         # create variable with 3d dimension (layer, y, x)
+        #         self.ncfile.createVariable(vn, v_cfg.vt, (dim_name, 'y', 'x'),
+        #                                    fill_value=self.cfg.fill_values[v_cfg.vt])
+        #
+        #         # prepare data slice
+        #         fill_val = self.cfg.slurb_vars_defaults.get(vn, 0.5)  # simplified default handling
+        #         data_slice = np.full((ny, nx), self.cfg.fill_values[v_cfg.vt], dtype=v_cfg.vt)
+        #         data_slice[slurb_mask] = fill_val
+        #
+        #         # fill all layers
+        #         for i in range(self.cfg.ndims_slurb[dim_name]):
+        #             self.ncfile.variables[vn][i, :, :] = data_slice
+        #
+        #         self.nc_write_attribute(vn, 'long_name', self.cfg.slurb_vars[vn].long_name)
+        #         self.nc_write_attribute(vn, 'units', self.cfg.slurb_vars[vn].units)
+        #         self.nc_write_attribute(vn, 'res_orig', self.cfg.domain.dz)
+        #         self.nc_write_attribute(vn, 'grid_mapping', 'crs')
+        #         self.nc_write_attribute(vn, 'coordinates', 'E_UTM N_UTM lon lat')
 
         return True
+
+    def _apply_canyon_coherence(self):
+        """Keep the canyon orientation only where the cell's neighbourhood has
+        a dominant street direction.
+
+        Coherence R = |length-weighted mean of the doubled street bearings|
+        of the street centreline segments within canyon_search_radius (0 =
+        streets in all directions, 1 = all parallel; axial data, so theta and
+        theta+180 count as the same). Below canyon_orientation_min_coherence
+        the orientation is set to the fill value, which PALM-SLUrb treats as
+        an isotropic street canyon; the aspect ratio is kept. Validation on
+        Kopisty: R >= 0.4 cells match the real streets to ~5 deg (median),
+        R < 0.4 cells (junctions, irregular networks) only to ~27 deg.
+        """
+        threshold = float(self.cfg.get('canyon_orientation_min_coherence', 0.0) or 0.0)
+        if threshold <= 0:
+            return
+        schema = self.cfg.domain.case_schema
+        segments = self.cfg.tables.centerline_segments
+        has_segments = self.fetchone(
+            "select exists(select 1 from information_schema.tables "
+            "where table_schema = %s and table_name = %s)", (schema, segments))
+        if not has_segments:
+            warning(f'no street centreline segments ("{schema}"."{segments}"; run prepare_slurb '
+                    f'and initialize_domain); canyon orientation kept without coherence check')
+            return
+
+        radius = float(self.cfg.canyon_search_radius)
+        sql = f"""
+            with pieces as (
+                select gs.id, (st_dumpsegments(st_intersection(s.geom, st_buffer(gs.point, %s)))).geom as g
+                from "{schema}"."{self.cfg.tables.grid_slurb}" gs
+                join "{schema}"."{segments}" s on st_dwithin(s.geom, gs.point, %s)
+                where gs.street_canyon_orientation is not null
+            ),
+            coherence as (
+                select id,
+                       sqrt(power(sum(st_length(g) * sin(2.0 * st_azimuth(st_startpoint(g), st_endpoint(g)))), 2)
+                          + power(sum(st_length(g) * cos(2.0 * st_azimuth(st_startpoint(g), st_endpoint(g)))), 2))
+                       / nullif(sum(st_length(g)), 0) as r
+                from pieces
+                where st_length(g) > 0
+                group by id
+            )
+            update "{schema}"."{self.cfg.tables.grid_slurb}" gs
+            set street_canyon_orientation = null
+            where gs.street_canyon_orientation is not null
+              and coalesce((select c.r from coherence c where c.id = gs.id), 0.0) < %s
+        """
+        n_before = self.fetchone(
+            f'select count(*) from "{schema}"."{self.cfg.tables.grid_slurb}" '
+            f'where street_canyon_orientation is not null')
+        self.execute(sql, (radius, radius, threshold))
+        n_after = self.fetchone(
+            f'select count(*) from "{schema}"."{self.cfg.tables.grid_slurb}" '
+            f'where street_canyon_orientation is not null')
+        progress('canyon orientation kept in {} of {} urban cell(s) with a dominant street '
+                 'direction (coherence >= {}); {} set isotropic', n_after, n_before,
+                 threshold, n_before - n_after)
+
+    def _apply_slurb_window(self, n):
+        """Replace the per-cell morphology in grid_slurb by its average over
+        the centred n x n reference window: plan/urban/frontal
+        fractions as window means, building height plan-area weighted."""
+        schema = self.cfg.domain.case_schema
+        table = self.cfg.tables.grid_slurb
+        ny, nx = self.cfg.domain.ny, self.cfg.domain.nx
+
+        rows = self.fetch(
+            f'select id, i, j, building_plan_area_fraction, urban_fraction, '
+            f'coalesce(building_frontal_area_fraction, 0.0), building_height '
+            f'from "{schema}"."{table}"')
+        i0 = min(r[1] for r in rows)
+        j0 = min(r[2] for r in rows)
+        ids = np.full((ny, nx), -1, dtype=np.int64)
+        plan, urban, frontal, height = (np.zeros((ny, nx)) for _ in range(4))
+        for rid, i, j, bp, uf, ff, h in rows:
+            jj, ii = j - j0, i - i0
+            ids[jj, ii] = rid
+            plan[jj, ii], urban[jj, ii], frontal[jj, ii] = bp or 0.0, uf or 0.0, ff or 0.0
+            height[jj, ii] = h if h is not None else 0.0
+
+        plan_w = np.minimum(box_mean(plan, n), 0.988)
+        urban_w = np.minimum(box_mean(urban, n), 1.0)
+        frontal_w = np.minimum(box_mean(frontal, n), 0.99)
+        height_w = weighted_box_mean(height, plan, n)
+
+        params = []
+        for jj, ii in zip(*np.nonzero(ids >= 0)):
+            h = height_w[jj, ii]
+            params.append((float(plan_w[jj, ii]), float(urban_w[jj, ii]),
+                           float(frontal_w[jj, ii]) if frontal_w[jj, ii] > 0 else None,
+                           None if np.isnan(h) else float(h), int(ids[jj, ii])))
+        self.execute_batch(
+            f'update "{schema}"."{table}" set building_plan_area_fraction = %s, '
+            f'urban_fraction = %s, building_frontal_area_fraction = %s, '
+            f'building_height = coalesce(%s, building_height) where id = %s', params)
+
+        progress('SLURB morphology averaged over a {}x{} cell reference window ({:.0f} m)',
+                 n, n, n * self.cfg.domain.dx)
 
     def check_consitency_slurb(self):
         """ """

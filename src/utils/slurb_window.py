@@ -1,4 +1,4 @@
-"""Sliding reference window for SLURB urban morphology (PG-72).
+"""Sliding reference window for SLURB urban morphology.
 
 The SLUrb guide: morphological parameters "are well-defined only for
 reference areas of at least 100x100 m2", so on finer grids they should be

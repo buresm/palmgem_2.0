@@ -31,14 +31,13 @@ class SetupTask(BaseTask):
         self.cfg.domain.update_setting('origin_x', origin_x)
         self.cfg.domain.update_setting('origin_y', origin_y)
 
-        # define the transformation query using strictly lower case functions
+        # transform the domain origin to lon/lat
         sql_transform = """
             select 
                 st_x(st_transform(st_setsrid(st_point(%s, %s), %s), %s)), 
                 st_y(st_transform(st_setsrid(st_point(%s, %s), %s), %s))
         """
 
-        # execute using the task's execution handler and dot-notation configuration
         res = self.execute(sql_transform, (
             self.cfg.domain.origin_x, self.cfg.domain.origin_y, self.cfg.srid_palm, self.cfg.srid_wgs84,
             self.cfg.domain.origin_x, self.cfg.domain.origin_y, self.cfg.srid_palm, self.cfg.srid_wgs84
@@ -64,7 +63,6 @@ class SetupTask(BaseTask):
         # the fishnet + envelope tasks.
         required = ['srid', 'srid_palm', 'srid_wgs84', 'srid_utm']
         for key in required:
-            # using dot-notation as requested
             try:
                 val = getattr(self.cfg, key)
                 verbose(f"projection {key} confirmed as {val}")

@@ -15,7 +15,7 @@ default_building_height: 20.0 # m
 # general rules
 min_plan_area: 0.2  # fraction of buildings where slurm is applied, else use LSM only
 
-# reference window for the urban morphology (PG-72). The SLUrb guide: the
+# reference window for the urban morphology. The SLUrb guide: the
 # morphological parameters "are well-defined only for reference areas of at
 # least 100x100 m2", so plan/urban/frontal fractions and building height are
 # averaged over a sliding window centred on each cell (odd cell count, e.g.
@@ -23,26 +23,26 @@ min_plan_area: 0.2  # fraction of buildings where slurm is applied, else use LSM
 # plan fraction in both drivers. 0 (or <= dx) = per grid cell.
 slurb_reference_size: 100.0 # m
 
-# street canyon assignment to urban cells (PG-69): each urban cell takes up to
+# street canyon assignment to urban cells: each urban cell takes up to
 # canyon_neighbours nearest canyon samples (points on the street centre line)
 # within canyon_search_radius; 50 m is the probe length prepare_slurb uses to
 # find the buildings on both sides of a street
 canyon_search_radius: 50.0 # m
 canyon_neighbours: 3
 # orientation only where the streets within canyon_search_radius share a
-# direction (PG-74): coherence R = |length-weighted mean of doubled street
+# direction: coherence R = |length-weighted mean of doubled street
 # bearings| (0 = all directions, 1 = parallel). Below the threshold the
 # orientation is written as fill value = isotropic canyon (PIDS_SLURB).
 # 0 = keep every orientation.
 canyon_orientation_min_coherence: 0.4
 
-# building_frontal_area_fraction = facade area * frontal_area_factor / cell area
-# (PG-71). 0.31831 = 1/pi: frontal area averaged over all wind directions for
+# building_frontal_area_fraction = facade area * frontal_area_factor / cell area.
+# 0.31831 = 1/pi: frontal area averaged over all wind directions for
 # convex buildings (Cauchy: mean projected width = perimeter / pi). 0.25 = wind
 # normal to one face of a square building; 1.0 = full facade-to-plan ratio.
 frontal_area_factor: 0.31831
 
-# how the static driver describes the land surface in SLURB mode (PG-70).
+# how the static driver describes the land surface in SLURB mode.
 # PALM-SLUrb models the urban part of a cell (buildings + streets, see
 # urban_fraction) and PALM-LSM the rest, so the static driver keeps the real
 # LSM types outside SLUrb cells and gives SLUrb cells (building plan fraction
@@ -61,11 +61,11 @@ slurb_vars_done: [
     'building_height',
 #    'building_indoor_temperature',  # constant 273.15 K placeholder
     'building_plan_area_fraction',
-    'building_type',                 # median landcover building type (9xx - 900) of the cell, nearest cell where it has none (as pre-2.0)
+    'building_type',                 # median landcover building type (9xx - 900) of the cell, nearest cell where it has none
 #    'pavement_type',                # constant type 1 placeholder
     'street_canyon_aspect_ratio',
     'street_canyon_orientation',
-    'urban_fraction'                 # building + pavement share of the cell (PG-69)
+    'urban_fraction'                 # building + pavement share of the cell
     ]
 slurb_vars:
     deep_soil_temperature:

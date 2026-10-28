@@ -67,8 +67,8 @@ def test_static_driver_pids_and_consistency(pipeline_output, cfg):
 
 @pytest.mark.integration
 @pytest.mark.slow
-@pytest.mark.xfail(reason='PG-67: baseline predates the building_min_nz fix and the '
-                          'buildings_2d/zt drift; regenerate it once PG-67 is resolved',
+@pytest.mark.xfail(reason='baseline predates the building_min_nz fix and an unresolved '
+                          'buildings_2d/zt drift; regenerate it once the drift is explained',
                    strict=False)
 def test_static_driver_matches_baseline(pipeline_output):
     """Regression net: values must match the committed baseline driver."""

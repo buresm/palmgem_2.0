@@ -182,7 +182,7 @@ def test_two_surface_types_error_unless_surface_fraction(tmp_path):
 
 
 def test_zero_height_building_is_error(tmp_path):
-    """the PG-68 case: a building cell whose height rounded down to 0"""
+    """a building cell whose height rounded down to 0"""
     path = str(tmp_path / 'flat.nc')
     _make_surface_nc(path, veg=[[3, 3], [None, None]],
                      bld_h=[[None, None], [0, 10]], bld_id=[[None, None], [1, 1]],

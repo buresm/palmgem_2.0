@@ -156,7 +156,7 @@ class Database:
         owner = self.pg_owner
         verbose(f"Changing owner of {schema}.{table_name} to {owner}")
 
-        # We use an f-string for identifiers (schema, table, owner)
+        # identifiers cannot be bound as parameters, so they are formatted in
         sqltext = f'ALTER TABLE "{schema}"."{table_name}" OWNER TO {owner}'
 
         try:
@@ -165,7 +165,6 @@ class Database:
             error(f"Failed to change ownership for {table_name}: {e}")
             raise
 
-    # Inside your Database class:
     def upload_dataframe(self, df: pd.DataFrame, schema: str, table: str, replace: bool = True):
         """
         Uploads a pandas DataFrame to the specified PostgreSQL table.
@@ -187,7 +186,7 @@ class Database:
             # We use the engine directly for pandas compatibility
             df.to_sql(
                 name=table,
-                con=self.engine,  # Using the sqlalchemy engine from your class
+                con=self.engine,  # the shared sqlalchemy engine
                 schema=schema,
                 if_exists=mode,
                 index=False,

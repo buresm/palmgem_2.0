@@ -38,6 +38,13 @@ docker compose down -v      # WARNING: deletes the data volume
 docker compose up -d
 ```
 
+How data gets into the container:
+
+- **GIS files.** `gis_import` runs `ogr2ogr` and `raster2pgsql | psql` on the host. They read the files from your disk and send the rows over the network connection to the published port, so the files never need to be copied or mounted into the container. The `data_imports` paths in your config are ordinary host paths.
+- **Port.** The container publishes PostgreSQL on `PALM_GEM_DB_PORT` (default 5432). If a native PostgreSQL already listens on 5432, set `PALM_GEM_DB_PORT=5433` in `.env`; the application reads the same value, so nothing else changes.
+- **Database dumps.** Restore with the host tools against the published port, e.g. `pg_restore -h localhost -p 5432 -U postgres -d palm_static backup.dump`.
+- **SQL functions.** The init scripts run only on the first start with an empty volume. After changing a file in `src/sql_function/`, load it again by hand, e.g. `docker exec -i palm_gem_db psql -U postgres -d palm_static < src/sql_function/palm_tree_grid.sql`.
+
 Then jump to [Python setup](#python-setup).
 
 #### Option B — Native install

@@ -71,8 +71,8 @@ class ConfigObj(object):
         try:
             return self._settings[name]
         except KeyError:
-            # Return None instead of crashing if a section is missing,
-            # or keep your strict AttributeError logic:
+            # a missing setting raises AttributeError, so getattr(cfg, key,
+            # default) and hasattr() work as usual
             raise AttributeError(f"Setting '{name}' not found in {':'.join(self._get_path()) or 'root'}")
 
     def __getitem__(self, key):
@@ -115,7 +115,7 @@ class ConfigObj(object):
             warn(f"Value '{key}' not found in {':'.join(self._get_path())}. Skipping update.")
             return
 
-        # If the value is a dict, we convert it to a ConfigObj to maintain dot-notation
+        # nested dicts become ConfigObj so they keep attribute access
         if isinstance(value, dict):
             new_obj = ConfigObj(self, key)
             new_obj._ingest_dict(value)

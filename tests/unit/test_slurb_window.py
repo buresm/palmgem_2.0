@@ -1,4 +1,4 @@
-"""Unit tests for the SLURB sliding reference window (PG-72)."""
+"""Unit tests for the SLURB sliding reference window."""
 import numpy as np
 import pytest
 
@@ -72,7 +72,7 @@ def test_dominant_type_over_window():
 
 def test_empty_window_is_exactly_zero_despite_large_values_elsewhere():
     """Integral-image rounding must not turn an empty window into 'area
-    present' (PG-72 regression: noise made dominant_type pick random types)."""
+    present' (otherwise the noise makes dominant_type pick random types)."""
     rng = np.random.default_rng(1)
     a = np.zeros((100, 100))
     a[:, 60:] = rng.random((100, 40)) * 100.0       # large areas on the right

@@ -237,9 +237,9 @@ building_surface_pars_bounds:
     26: [0, 1.0, 'Longwave albedo of green fraction']
     27: [0, 1.0, 'Shortwave albedo of green fraction']
 
-# calculation formulas for particular parameters of albedo_pars(nalbedo_pars,y,x)
-# [landcover, building roof, building wall (above groud floor level)]
-albedo_pars:
+# bounds of albedo_pars(nalbedo_pars,y,x). The key needs the _bounds suffix:
+# a plain 'albedo_pars' would merge into the formulas in default_lsm_config.yaml
+albedo_pars_bounds:
     0: [0, 1.0, 'Broadband albedo (wall fraction in case of building) at (y,x).']
     1: [0, 1.0, 'Only for buildings. Longwave albedo of wall fraction at (y,x).']
     2: [0, 1.0, 'Only for buildings. Shortwave albedo of wall fraction at (y,x).']

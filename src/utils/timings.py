@@ -5,8 +5,7 @@ Every pipeline run appends one JSON line per case to
 recording, the current run is compared against the median of the previous
 successful runs, and any task slower than ``timings.slowdown_factor`` times
 its median is warned about — so a performance regression is visible the day
-it appears instead of after a 45-minute run (see the PG-51 optimisation
-pass, all of which this would have flagged).
+it appears, not after a run has already grown to 45 minutes.
 """
 import json
 import os

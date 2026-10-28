@@ -1,4 +1,4 @@
-"""Unit tests for the SLURB-mode land surface of the static driver (PG-70).
+"""Unit tests for the SLURB-mode land surface of the static driver.
 
 ``StaticDriverGen._write_slurb_lsm_surface`` gives every SLUrb cell its
 dominant non-urban LSM type and leaves all other cells untouched. The SQL

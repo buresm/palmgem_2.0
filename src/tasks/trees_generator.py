@@ -47,7 +47,6 @@ class LadGenerator(BaseTask):
         verbose(f'max tree height {thm} m -> {nzlad} vertical canopy layers (nzlad)')
 
         # 4. dynamically add lad and bad columns for each vertical level
-        # keywords and types are strictly lower case
         debug('adding vertical density columns to trees_grid')
         if nzlad > 0:
             alter_parts = []
@@ -82,8 +81,7 @@ class LadGenerator(BaseTask):
         sql_owner = f'alter table "{self.cfg.domain.case_schema}"."{self.cfg.tables.trees_grid}" owner to {self.cfg.pg_owner}'
         self.execute(sql_owner)
 
-        # 7. optional constant LAD in the whole tree volume (pre-2.0 option
-        # trees.constant_lad, "add custom fix lad"; lost in the 2.0 rewrite):
+        # 7. optional constant LAD in the whole tree volume (trees.constant_lad):
         # every cell with leaves gets constant_lad_val, BAD = bad_coef * it
         if self.cfg.trees.get('constant_lad', False):
             lad_val = float(self.cfg.trees.constant_lad_val)

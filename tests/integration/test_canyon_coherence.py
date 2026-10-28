@@ -1,4 +1,4 @@
-"""Canyon orientation coherence check (PG-74) against a live PostGIS.
+"""Canyon orientation coherence check against a live PostGIS.
 
 Builds a throw-away schema with two SLUrb cells: one on a straight street
 (coherence ~1 -> orientation kept) and one at a four-way junction

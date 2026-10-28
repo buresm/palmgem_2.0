@@ -17,7 +17,7 @@ class FinalizeTask(BaseTask):
             error(f"failed to close database connection: {e}")
 
         # 2. close netcdf handles (if stored in cfg or task state)
-        # assuming ncfile handles were stored in the shared config or a global registry
+        # close any netcdf files still held open in the shared config
         if hasattr(self.cfg, '_nc_handles'):
             for name, handle in self.cfg._nc_handles.items():
                 try:

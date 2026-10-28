@@ -20,9 +20,9 @@ class UrbanAtlasOSM(BaseTask):
         # OSM streetmap merge is opt-in: it needs an imported streetmaps table
         # (tables.streetmaps_or) and is enabled via process_streetmaps in config.
         # The landcover finalisation (column restructuring, primary key and the
-        # UrbanAtlas code -> PALM type mapping) always runs, as in pre-2.0;
-        # 2.0 had tied it to process_streetmaps, so with the default (False)
-        # the landcover kept raw UrbanAtlas codes and got no type column.
+        # UrbanAtlas code -> PALM type mapping) always runs, with or without
+        # streetmaps; otherwise the landcover would keep raw UrbanAtlas codes
+        # and have no type column.
         with_streetmaps = getattr(self.cfg, 'process_streetmaps', False)
         if with_streetmaps:
             self.transform_streetmaps()
@@ -43,7 +43,6 @@ class UrbanAtlasOSM(BaseTask):
         """
         progress('creating fishnet')
 
-        # access variables using dot-notation from self.cfg
         dx = self.cfg.fishnet.dx
         dy = self.cfg.fishnet.dy
         xl = self.cfg.domain.xl
@@ -65,8 +64,7 @@ class UrbanAtlasOSM(BaseTask):
 
         debug('creating fishnet using palm_create_grid psql function')
 
-        # using lower case for the psql call
-        # note: identifiers like schema and table remain in f-string for structure
+        # build the fishnet with palm_create_grid
         sqltext = "select palm_create_grid(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
 
         params = (
@@ -85,7 +83,6 @@ class UrbanAtlasOSM(BaseTask):
             self.cfg.logs.level
         )
 
-        # self.execute handles cursor management, sql_debug, and autocommit
         self.execute(sqltext, params)
 
         debug('fishnet created')
@@ -134,10 +131,8 @@ class UrbanAtlasOSM(BaseTask):
 
     def transform_urban_atlas(self):
         """ Do a transformation of original shapefile. Intersects with a fishnet for faster spatial join. """
-        # refactored landcover clipping logic
 
         debug('creating fishnet')
-        # assuming create_fishnet is now a method of your task or has been updated to use self.cfg
         self.create_fishnet()
 
         progress('clipping landcover by fishnet')
@@ -147,7 +142,7 @@ class UrbanAtlasOSM(BaseTask):
         # UrbanAtlas path carries the code column for the mt mapping instead
         attr = 'type' if self.cfg.landcover_has_types else 'code'
 
-        # sql logic using lower case and f-strings for table/schema identifiers
+        # clip landcover by the envelope and split large polygons along the fishnet
         sql_clip = f"""
             drop table if exists "{self.cfg.input_schema}"."{self.cfg.tables.im_landcover}" cascade;
 
@@ -166,10 +161,9 @@ class UrbanAtlasOSM(BaseTask):
             where st_intersects(l.geom, f.geom) and st_area(l.geom) <= {self.cfg.max_fishnet_split_area};
         """
 
-        # execute using parameterized values for srid and envelope
         self.execute(sql_clip, (self.cfg.srid, self.cfg.srid, self.cfg.envelope))
 
-        # handle cleanup using .get() for safety
+        # drop the original import when clean_up is set
         if self.cfg.clean_up:
             debug('drop original landcover table')
             sql_drop = f'drop table "{self.cfg.input_schema}"."{self.cfg.tables.im_landcover_or}" cascade;'
@@ -179,7 +173,7 @@ class UrbanAtlasOSM(BaseTask):
         self.set_table_owner(self.cfg.input_schema, self.cfg.tables.im_landcover)
 
         verbose('adding geometry index to landcover table')
-        # create gist spatial index using lower case
+        # create gist spatial index
         sql_idx = f"""
             create index if not exists {self.cfg.tables.im_landcover}_geom_idx 
             on "{self.cfg.input_schema}"."{self.cfg.tables.im_landcover}" 

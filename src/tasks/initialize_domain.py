@@ -80,7 +80,7 @@ class InitializeDomainTask(BaseTask):
         """
         debug(f'creating regular case grid: {self.cfg.tables.grid}')
 
-        # using lower case for the procedure call via select
+        # call the stored procedure
         sql_proc = "select palm_create_grid(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
 
         params = (
@@ -99,11 +99,10 @@ class InitializeDomainTask(BaseTask):
             self.cfg.logs.level
         )
 
-        # self.execute handles cursor, sql_debug, and internal commits
         self.execute(sql_proc, params)
         debug('grid created')
 
-        # add nz and height column to grid using lower case keywords
+        # add nz and height column to grid
         debug('adding height and nz fields to grid')
         sql_alter = f"""
             alter table "{self.cfg.domain.case_schema}"."{self.cfg.tables.grid}" 
@@ -122,7 +121,7 @@ class InitializeDomainTask(BaseTask):
         """
         self.execute(sql_update, (self.cfg.srid_palm,))
 
-        # add spatial index using lower case
+        # add spatial index
         debug('creating spatial index on grid points')
         sql_index = f"""
             create index if not exists {self.cfg.tables.grid}_point_geom_idx
@@ -136,7 +135,7 @@ class InitializeDomainTask(BaseTask):
         calculate grid envelope for further use in inputs clipping.
         envelope is created as a rectangle around the grid extent.
         """
-        # 1. get the raw min/max coordinates using lower case keywords
+        # 1. get the raw min/max coordinates
         sql_minmax = f"""
             select min(xmi), max(xma), min(ymi), max(yma) 
             from "{self.cfg.domain.case_schema}"."{self.cfg.tables.grid}"
@@ -180,8 +179,8 @@ class InitializeDomainTask(BaseTask):
             self.cfg.idx.building_area
         ]
         # SLURB: the street centreline segments from prepare_slurb, used by the
-        # driver to judge whether a cell has one dominant canyon direction
-        # (PG-74); optional, the driver skips that check without them
+        # driver to judge whether a cell has one dominant canyon direction;
+        # optional, the driver skips that check without them
         if self.cfg.slurb:
             vtables.append(self.cfg.tables.centerline_segments)
             vidx.append(self.cfg.idx.get('centerline_segments', 'sid'))
@@ -321,7 +320,7 @@ class InitializeDomainTask(BaseTask):
         """
         retile inputted raster and add geometry indexes for faster joining.
         """
-        # 1. determine nodata value using lower case sql
+        # 1. determine nodata value
         try:
             sql_nodata = f"""
                 select (st_bandmetadata(rast)).nodatavalue
@@ -467,7 +466,6 @@ class InitializeDomainTask(BaseTask):
                 self.execute(sql_ins, (grid_ext,))
 
             # 5. retile and validate
-            # assuming retile_raster is now a method of the task class
             self.retile_raster(rel)
 
             sql_final_count = f'select count(*) from "{self.cfg.domain.case_schema}"."{rel}"'
@@ -734,10 +732,9 @@ class InitializeDomainTask(BaseTask):
         """
         joins adjacent buildings using convex hull logic and standardized wall segmentation.
         """
-        # cut-cell topography only, and only with a building-height raster
-        # (pre-2.0 main_palm_static). The 2.0 guard was inverted and also ran
-        # this for every case WITHOUT a raster, merging buildings by convex
-        # hull and switching off 3-D buildings and LOD2.
+        # cut-cell topography only, and only with a building-height raster.
+        # Running it in any other case would merge buildings by convex hull
+        # and switch off 3-D buildings and LOD2.
         if not (self.cfg.do_cct and self.cfg.tables.buildings_height in self.cfg.rtabs):
             return
         progress('starting preprocessing of building landcover geometries')
@@ -885,8 +882,7 @@ class InitializeDomainTask(BaseTask):
         """
         self.execute(sql_lc_dif)
 
-        # correct the types of the split pieces (pre-2.0 "Updating corrected
-        # landcover"; lost in the 2.0 rewrite): building-typed pieces left in
+        # correct the types of the split pieces: building-typed pieces left in
         # the difference take the nearest non-building type/lid, non-building
         # pieces of the intersection take the nearest building type/lid
         tr = self.cfg.type_range
@@ -1065,7 +1061,7 @@ class InitializeDomainTask(BaseTask):
                 source_schema = self.cfg.domain.parent_domain_schema
                 debug(f'calculating origin_z from parent domain: {source_schema}')
 
-            # 2. calculate minimum height using lower case sql
+            # 2. calculate minimum height
             sql_min = f'select min(height) from "{source_schema}"."{self.cfg.tables.grid}"'
             res = self.execute(sql_min)
 
@@ -1100,8 +1096,8 @@ class InitializeDomainTask(BaseTask):
         # 1. handle slurb simplification (force type 101 for non-buildings).
         # Legacy only (slurb_lsm_bare_soil): it erases vegetation, pavement and
         # water from the static driver and the streets from urban_fraction,
-        # while PALM-SLUrb expects LSM to keep modelling the non-urban surface
-        # (PG-70). By default the real types are kept and the static driver
+        # while PALM-SLUrb expects LSM to keep modelling the non-urban surface.
+        # By default the real types are kept and the static driver
         # assigns SLUrb cells their dominant non-urban type (write_mask_usm).
         if self.cfg.slurb and self.cfg.get('slurb_lsm_bare_soil', False):
             debug('slurb mode active: forcing landcover types below 900 to type 101')
@@ -1461,14 +1457,13 @@ class InitializeDomainTask(BaseTask):
 
     def _fill_default_building_heights(self):
         """ fill buildings grid where height is missing (null or 0) with values
-        from config; types without a configured default get dz. As in pre-2.0
-        connect_buildings_height: the 2.0 rewrite handled only null and kept
-        null for unlisted types, so raster heights of exactly 0 became
-        zero-height buildings. """
+        from config; types without a configured default get dz. Treating 0 as
+        missing keeps raster heights of exactly 0 from becoming zero-height
+        buildings. """
         schema = self.cfg.domain.case_schema
         table = self.cfg.tables.buildings_grid
 
-        # map your config values to a sql case statement
+        # map the configured default heights to a sql case statement
         # categories: 0=default, 1-3=residential, 4-6=office
         height_map = dict(self.cfg.default_height._settings)
 
@@ -1876,14 +1871,13 @@ class InitializeDomainTask(BaseTask):
         this replicates the internal palm-4u hole-filling logic to prevent
         numerical instabilities caused by isolated air pockets within buildings.
         """
-        # fill_missing_holes is the user switch (pre-2.0 main_palm_static gated
-        # the call on it; 2.0 had dropped the check, so False was ignored)
+        # fill_missing_holes is the user switch for this step
         if self.cfg.force_lsm_only or not self.cfg.get('fill_missing_holes', True):
             return
 
         progress('filling building holes in the 3d grid')
 
-        # call the stored procedure using strictly lower case keywords
+        # call the stored procedure
         # we pass parameters for schema, tables, building type ranges, and domain dimensions
         sql_call = f"""
             select palm_fill_building_holes(
@@ -1919,7 +1913,6 @@ class InitializeDomainTask(BaseTask):
         """
         progress('performing corner topography fill')
 
-        # variables for f-string injection
         schema = self.cfg.domain.case_schema
         grid_tbl = self.cfg.tables.grid
         build_tbl = self.cfg.tables.buildings_grid
@@ -2194,8 +2187,8 @@ class InitializeDomainTask(BaseTask):
         if self.cfg.topo_fill_corners:
             self.topo_fill_corners()
 
-        # the cyclic boundary condition is enforced last, in process_usm (as
-        # pre-2.0): applying it here let the later fill_near_boundary undo it
+        # the cyclic boundary condition is enforced last, in process_usm:
+        # applying it here would let the later fill_near_boundary undo it
 
     def _process_3d_features(self):
         """ handles overhangs, passages and bridges """
@@ -2216,8 +2209,8 @@ class InitializeDomainTask(BaseTask):
             where bd.has_bottom
         """)
 
-        # fill missing bottom heights from the nearest non-zero one (pre-2.0
-        # semantics; the bridge-height fill below follows the same rule)
+        # fill missing bottom heights from the nearest non-zero one (the
+        # bridge-height fill below follows the same rule)
         self.execute(f"""
             update "{self.cfg.domain.case_schema}"."{self.cfg.tables.buildings_grid}" as bd 
             set height_bottom = (select bdd.height_bottom from "{self.cfg.domain.case_schema}"."{self.cfg.tables.buildings_grid}" as bdd where bdd.height_bottom is not null and bdd.height_bottom != 0 order by bdd.point <-> bd.point limit 1)
@@ -2565,10 +2558,8 @@ class InitializeDomainTask(BaseTask):
             self.execute(sql_outer, params)
 
         # 3. inner walls and roof vertical surfaces, then link every wall to its
-        # input wall line (wid) and every roof step to its roof (rid). This was
-        # lost in the 2.0 rewrite (a placeholder comment stood here), which left
-        # wid null everywhere: all wall material parameters came out as fill.
-        # Restored from the pre-2.0 palm_static_pg_lib.connect_walls.
+        # input wall line (wid) and every roof step to its roof (rid). Without
+        # the wid link all wall material parameters would come out as fill.
         for d, (wdx, wdy) in enumerate(self.cfg.walls.wall_directions):
             wa = self.cfg.walls.wall_azimuth[d]
             # coordinates/geometry of the cell edge facing direction d; the same
@@ -2674,8 +2665,7 @@ class InitializeDomainTask(BaseTask):
                      (self.cfg.domain.origin_x, self.cfg.domain.origin_y, self.cfg.domain.dz, direction_up))
 
         # 5b. 3-D buildings: upward faces of bridges and downward faces under
-        # overhangs/bridges (also lost in the 2.0 rewrite; restored from the
-        # pre-2.0 connect_walls)
+        # overhangs/bridges
         if self.cfg.has_3d_buildings and self.cfg.tables.extras_shp in self.cfg.vtabs:
             max_sid = self.fetchone(
                 f'select coalesce(max(sid), -1) + 1 from "{self.cfg.domain.case_schema}"."{self.cfg.tables.surfaces}"')
@@ -2905,11 +2895,10 @@ class InitializeDomainTask(BaseTask):
 
 
     def domain_and_buildings_height_operations(self):
-        """ Domain and building height operations, in the pre-2.0 order
-        (connect_buildings_height of palm_static_pg_lib): heights, building
-        offset, topography fills, the CCT minimum building height, and the
-        boundary fill once at the end. The 2.0 rewrite had added a second,
-        earlier fill_near_boundary and moved the CCT step before the offset. """
+        """ Domain and building height operations, in this order: heights,
+        building offset, topography fills, the CCT minimum building height,
+        and the boundary fill once at the end. The boundary fill must come
+        last so the topography fills cannot reopen boundary canyons. """
         self.fill_missing_holes_in_grid()
 
         self.connect_buildings_height()
@@ -2929,8 +2918,7 @@ class InitializeDomainTask(BaseTask):
                          f'set nz = 3, height = 3 * %s where nz < 3 or height < 3 * %s', (self.cfg.domain.dz, self.cfg.domain.dz))
 
     def process_usm(self):
-        """ Urban surfaces, in the pre-2.0 order (main_palm_static): CCT outer
-        walls/roofs, LOD2 roofs and walls, then the cyclic boundary condition
+        """ Urban surfaces, in this order: CCT outer walls/roofs, LOD2 roofs and walls, then the cyclic boundary condition
         last so that nothing after it modifies the boundary rows. """
         if self.cfg.do_cct:
             self.create_outer_walls_and_roofs_cct()

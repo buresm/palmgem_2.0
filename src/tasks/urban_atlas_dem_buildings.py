@@ -101,11 +101,10 @@ class UrbanAtlasDemBuildings(BaseTask):
 
     def run_buildings(self):
         progress('Processing buildings')
-        # Refactored for self.cfg (ConfigObj) and Database execution patterns
 
         debug('Checking buildings raster existence in input schema')
 
-        # Use a parameterized query to check for table existence
+        # check whether the buildings raster was imported
         check_sql = """
             SELECT EXISTS(
                 SELECT 1 FROM information_schema.tables 
@@ -133,7 +132,7 @@ class UrbanAtlasDemBuildings(BaseTask):
             """
             self.execute(sql_transform, (self.cfg.srid,))
 
-            # 2. Change Ownership (using the helper method)
+            # 2. Change ownership
             self.set_table_owner(self.cfg.input_schema, self.cfg.tables.buildings)
 
             # 3. Handle rid index
