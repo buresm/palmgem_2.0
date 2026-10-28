@@ -110,6 +110,7 @@ idx:
     extras_shp: 'gid'
     centerline: 'gid'
     building_area: 'id'
+    centerline_segments: 'sid'
     imported_landcover: 'lid'
     imported_streetmap: 'gid'
     
@@ -172,6 +173,10 @@ force_building_boundary: True
 force_building_boundary_dist: 3 # distance in grid points, real distance =* dx
 crop_small_buildings: False  # In case of slanted faces
 small_buildings_area: 20 # Area in grid points
+# minimum number of vertical levels of a building cell; heights below dz/2
+# would otherwise round to nz = 0 and leave building cells with zero height
+# (0 = keep the plain rounding)
+building_min_nz: 1
 boundary_fill_1: True
 boundary_fill_2: False
 

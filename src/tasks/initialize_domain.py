@@ -4,6 +4,7 @@ import pandas as pd
 
 from .base import BaseTask
 from src.logger import debug, progress, verbose, warning, error, sql_debug, sql_verbose, extra_verbose
+from src.utils.capabilities import build_impervious_correction
 
 class InitializeDomainTask(BaseTask):
     def run(self):
@@ -178,6 +179,12 @@ class InitializeDomainTask(BaseTask):
             self.cfg.idx.trees, self.cfg.idx.extras_shp, self.cfg.idx.centerline,
             self.cfg.idx.building_area
         ]
+        # SLURB: the street centreline segments from prepare_slurb, used by the
+        # driver to judge whether a cell has one dominant canyon direction
+        # (PG-74); optional, the driver skips that check without them
+        if self.cfg.slurb:
+            vtables.append(self.cfg.tables.centerline_segments)
+            vidx.append(self.cfg.idx.get('centerline_segments', 'sid'))
         vtabs = []
 
         # retrieved from self.cfg.domain.grid_ext (calculated in previous step)
@@ -268,7 +275,16 @@ class InitializeDomainTask(BaseTask):
             self.execute(
                 f'create index if not exists {rel}_geom_idx on "{self.cfg.domain.case_schema}"."{rel}" using gist(geom)')
 
-            # primary key handling
+            # primary key handling; tables without an id column (e.g. the
+            # st_dump output of prepare_slurb) get a serial one
+            has_idx = self.fetchone(
+                "select exists(select 1 from information_schema.columns "
+                "where table_schema = %s and table_name = %s and column_name = %s)",
+                (self.cfg.domain.case_schema, rel, idx))
+            if not has_idx:
+                verbose(f'{rel} has no {idx} column; adding a serial id')
+                self.execute(f'alter table "{self.cfg.domain.case_schema}"."{rel}" add column {idx} serial')
+
             sql_uniques = f"""
                 select count(*) from (
                     select count(*) from "{self.cfg.domain.case_schema}"."{rel}" 
@@ -718,7 +734,11 @@ class InitializeDomainTask(BaseTask):
         """
         joins adjacent buildings using convex hull logic and standardized wall segmentation.
         """
-        if not self.cfg.do_cct and self.cfg.tables.buildings_height in self.cfg.rtabs:
+        # cut-cell topography only, and only with a building-height raster
+        # (pre-2.0 main_palm_static). The 2.0 guard was inverted and also ran
+        # this for every case WITHOUT a raster, merging buildings by convex
+        # hull and switching off 3-D buildings and LOD2.
+        if not (self.cfg.do_cct and self.cfg.tables.buildings_height in self.cfg.rtabs):
             return
         progress('starting preprocessing of building landcover geometries')
 
@@ -864,6 +884,28 @@ class InitializeDomainTask(BaseTask):
             from "{self.cfg.domain.case_schema}"."{self.cfg.tables.landcover}" as l, lb
         """
         self.execute(sql_lc_dif)
+
+        # correct the types of the split pieces (pre-2.0 "Updating corrected
+        # landcover"; lost in the 2.0 rewrite): building-typed pieces left in
+        # the difference take the nearest non-building type/lid, non-building
+        # pieces of the intersection take the nearest building type/lid
+        tr = self.cfg.type_range
+        self.execute(f"""
+            update "{self.cfg.domain.case_schema}"."{lc_dif}" as l
+            set (type, lid) = (
+                select lo.type, lo.lid from "{self.cfg.domain.case_schema}"."{self.cfg.tables.landcover}" lo
+                where not lo.type between %s and %s
+                order by lo.geom <-> l.geom limit 1)
+            where l.type between %s and %s
+        """, (tr.building_min, tr.building_max, tr.building_min, tr.building_max))
+        self.execute(f"""
+            update "{self.cfg.domain.case_schema}"."{lc_intersect}" as l
+            set (type, lid) = (
+                select lo.type, lo.lid from "{self.cfg.domain.case_schema}"."{self.cfg.tables.landcover}" lo
+                where lo.type between %s and %s
+                order by lo.geom <-> l.geom limit 1)
+            where not l.type between %s and %s
+        """, (tr.building_min, tr.building_max, tr.building_min, tr.building_max))
 
         # 9. finalize landcover table swap
         old_lc = f"{self.cfg.tables.landcover}_old"
@@ -1055,8 +1097,13 @@ class InitializeDomainTask(BaseTask):
         """
         progress('connecting landcover to grid cells')
 
-        # 1. handle slurb simplification (force type 101 for non-buildings)
-        if self.cfg.slurb:
+        # 1. handle slurb simplification (force type 101 for non-buildings).
+        # Legacy only (slurb_lsm_bare_soil): it erases vegetation, pavement and
+        # water from the static driver and the streets from urban_fraction,
+        # while PALM-SLUrb expects LSM to keep modelling the non-urban surface
+        # (PG-70). By default the real types are kept and the static driver
+        # assigns SLUrb cells their dominant non-urban type (write_mask_usm).
+        if self.cfg.slurb and self.cfg.get('slurb_lsm_bare_soil', False):
             debug('slurb mode active: forcing landcover types below 900 to type 101')
             sql_slurb = f"""
                 update "{self.cfg.domain.case_schema}"."{self.cfg.tables.landcover}" 
@@ -1269,11 +1316,12 @@ class InitializeDomainTask(BaseTask):
         lids_tuple = tuple(lids_list) if len(lids_list) > 1 else f"({lids_list[0]})"
 
         if self.cfg.lod2:
-            verbose('updating landcover with lod2 parameters (type, catland, albedo, emissivity)')
+            cols = ['type', 'catland'] + self._landcover_optional_columns()
+            verbose(f'updating landcover with lod2 parameters ({", ".join(cols)})')
             sql_update = f"""
-                update "{self.cfg.domain.case_schema}"."{self.cfg.tables.landcover}" as l 
-                set (type, catland, albedo, emissivity) = (
-                    select b.type, b.catland, b.albedo, b.emissivity
+                update "{self.cfg.domain.case_schema}"."{self.cfg.tables.landcover}" as l
+                set ({", ".join(cols)}) = (
+                    select {", ".join("b." + c for c in cols)}
                     from "{self.cfg.domain.case_schema}"."{self.cfg.tables.landcover}" as b
                     where b.type between %s and %s
                     order by b.geom <-> l.geom limit 1
@@ -1351,6 +1399,18 @@ class InitializeDomainTask(BaseTask):
 
         progress('polygon courtyard filling complete')
 
+    def _landcover_optional_columns(self):
+        """The optional per-polygon LOD2 columns (albedo, emissivity) that the
+        case landcover actually has. The driver takes both from surface_params
+        via catland; inputs may carry them under other names (e.g. the
+        prague_lod2 'emisivita') or not at all, so updates must not assume
+        them."""
+        rows = self.fetch(
+            "select column_name from information_schema.columns "
+            "where table_schema = %s and table_name = %s and column_name in ('albedo', 'emissivity')",
+            (self.cfg.domain.case_schema, self.cfg.tables.landcover))
+        return sorted(r[0] for r in rows)
+
     def force_building_boundary(self):
         """ remove buildings near domain boundary """
         if not self.cfg.force_building_boundary:
@@ -1360,14 +1420,19 @@ class InitializeDomainTask(BaseTask):
         dist_limit = self.cfg.force_building_boundary_dist * self.cfg.domain.dx
 
         if self.cfg.lod2:
-            # modify both type and catland for lod2
+            # modify both type and catland for lod2 (catland 32 = asphalt in
+            # surface_params, which the driver reads albedo/emissivity from);
+            # the per-polygon albedo/emissivity columns are optional inputs
+            sets = ['type = 202', 'catland = 32']
+            optional = self._landcover_optional_columns()
+            if 'albedo' in optional:
+                sets.append('albedo = 0.1')
+            if 'emissivity' in optional:
+                sets.append('emissivity = 0.93')
             sql_boundary = f"""
-                update "{self.cfg.domain.case_schema}"."{self.cfg.tables.landcover}" as l 
-                set type = 202, 
-                    catland = 32,
-                    albedo = 0.1,
-                    emissivity = 0.93
-                where type >= %s 
+                update "{self.cfg.domain.case_schema}"."{self.cfg.tables.landcover}" as l
+                set {", ".join(sets)}
+                where type >= %s
                     and st_distance(l.geom, st_boundary(%s::geometry)) < %s
             """
             self.execute(sql_boundary, (self.cfg.type_range.building_min, self.cfg.domain.grid_ext, dist_limit))
@@ -1395,7 +1460,11 @@ class InitializeDomainTask(BaseTask):
         self.execute(sql_small, (self.cfg.type_range.building_min, area_limit))
 
     def _fill_default_building_heights(self):
-        """ fill buildings grid where height is null with values from config """
+        """ fill buildings grid where height is missing (null or 0) with values
+        from config; types without a configured default get dz. As in pre-2.0
+        connect_buildings_height: the 2.0 rewrite handled only null and kept
+        null for unlisted types, so raster heights of exactly 0 became
+        zero-height buildings. """
         schema = self.cfg.domain.case_schema
         table = self.cfg.tables.buildings_grid
 
@@ -1403,7 +1472,7 @@ class InitializeDomainTask(BaseTask):
         # categories: 0=default, 1-3=residential, 4-6=office
         height_map = dict(self.cfg.default_height._settings)
 
-        progress('filling null building heights with default values')
+        progress('filling missing (null or 0) building heights with default values')
 
         # building the case statement dynamically from the config dictionary
         case_clauses = " ".join([
@@ -1413,8 +1482,8 @@ class InitializeDomainTask(BaseTask):
 
         sqltext = f'update "{schema}"."{table}" set ' \
                   f'height = case {case_clauses} ' \
-                  '              else height end ' \
-                  'where height is null'
+                  f'              else {self.cfg.domain.dz} end ' \
+                  'where height is null or height = 0'
 
         self.execute(sqltext)
 
@@ -1507,9 +1576,13 @@ class InitializeDomainTask(BaseTask):
         # 3. fill remain missing with default according to its type
         self._fill_default_building_heights()
 
-        # 4. calculate nz and init 3d columns
+        # 4. calculate nz and init 3d columns; a building cell keeps at least
+        # building_min_nz levels, otherwise heights below dz/2 round to nz = 0 and
+        # the driver carries building cells with buildings_2d = 0
         self.execute(f'update "{self.cfg.domain.case_schema}"."{self.cfg.tables.buildings_grid}" '
-                     f'set nz = cast(round(height/%s+0.001) as integer)', (self.cfg.domain.dz,))
+                     f'set nz = case when height is null then null '
+                     f'else greatest(cast(round(height/%s+0.001) as integer), %s) end',
+                     (self.cfg.domain.dz, int(self.cfg.get('building_min_nz', 1))))
 
         self.execute(f'alter table "{self.cfg.domain.case_schema}"."{self.cfg.tables.buildings_grid}" '
                      f'add if not exists nz_min integer, add if not exists has_bottom boolean default false, '
@@ -1524,10 +1597,8 @@ class InitializeDomainTask(BaseTask):
         if self.cfg.has_3d_buildings:
             self._process_3d_features()
 
-        # 9. boundary and cct constraints
-        if self.cfg.do_cct:
-            self.execute(f'update "{self.cfg.domain.case_schema}"."{self.cfg.tables.buildings_grid}" '
-                         f'set nz = 3, height = 3 * %s where nz < 3 or height < 3 * %s', (self.cfg.domain.dz, self.cfg.domain.dz))
+        # 9. the cct minimum building height runs after the building offset and
+        # the topography fills: see _apply_cct_min_building_height
 
     def _define_building_offset(self):
         """ Placing building on top of flat terrain. """
@@ -1805,7 +1876,9 @@ class InitializeDomainTask(BaseTask):
         this replicates the internal palm-4u hole-filling logic to prevent
         numerical instabilities caused by isolated air pockets within buildings.
         """
-        if self.cfg.force_lsm_only:
+        # fill_missing_holes is the user switch (pre-2.0 main_palm_static gated
+        # the call on it; 2.0 had dropped the check, so False was ignored)
+        if self.cfg.force_lsm_only or not self.cfg.get('fill_missing_holes', True):
             return
 
         progress('filling building holes in the 3d grid')
@@ -2121,8 +2194,8 @@ class InitializeDomainTask(BaseTask):
         if self.cfg.topo_fill_corners:
             self.topo_fill_corners()
 
-        # cycling conditions
-        self.update_force_cyclic()
+        # the cyclic boundary condition is enforced last, in process_usm (as
+        # pre-2.0): applying it here let the later fill_near_boundary undo it
 
     def _process_3d_features(self):
         """ handles overhangs, passages and bridges """
@@ -2143,10 +2216,11 @@ class InitializeDomainTask(BaseTask):
             where bd.has_bottom
         """)
 
-        # fill missing bottom heights
+        # fill missing bottom heights from the nearest non-zero one (pre-2.0
+        # semantics; the bridge-height fill below follows the same rule)
         self.execute(f"""
             update "{self.cfg.domain.case_schema}"."{self.cfg.tables.buildings_grid}" as bd 
-            set height_bottom = (select bdd.height_bottom from "{self.cfg.domain.case_schema}"."{self.cfg.tables.buildings_grid}" as bdd where (bdd.height_bottom != 0 or bdd.height_bottom is not null) order by bdd.point <-> bd.point limit 1)
+            set height_bottom = (select bdd.height_bottom from "{self.cfg.domain.case_schema}"."{self.cfg.tables.buildings_grid}" as bdd where bdd.height_bottom is not null and bdd.height_bottom != 0 order by bdd.point <-> bd.point limit 1)
             where bd.has_bottom and bd.height_bottom is null
         """)
 
@@ -2179,7 +2253,7 @@ class InitializeDomainTask(BaseTask):
 
         self.execute(f"""
             update "{self.cfg.domain.case_schema}"."{self.cfg.tables.buildings_grid}" as br 
-            set (height, height_bottom) = (select brn.height, brn.height_bottom from "{self.cfg.domain.case_schema}"."{self.cfg.tables.buildings_grid}" as brn where (brn.height != 0 or brn.height is not null) order by brn.point <-> br.point limit 1)
+            set (height, height_bottom) = (select brn.height, brn.height_bottom from "{self.cfg.domain.case_schema}"."{self.cfg.tables.buildings_grid}" as brn where brn.height is not null and brn.height != 0 order by brn.point <-> br.point limit 1)
             where (br.height is null or br.height = 0) and br.is_bridge
         """)
 
@@ -2490,12 +2564,88 @@ class InitializeDomainTask(BaseTask):
             )
             self.execute(sql_outer, params)
 
-        # 3. insert inner walls and roof vertical surfaces (shortened for brevity but logic fully preserved)
-        # [logic for inner_wall = true and isroof = true goes here following same lowercase/cfg pattern]
+        # 3. inner walls and roof vertical surfaces, then link every wall to its
+        # input wall line (wid) and every roof step to its roof (rid). This was
+        # lost in the 2.0 rewrite (a placeholder comment stood here), which left
+        # wid null everywhere: all wall material parameters came out as fill.
+        # Restored from the pre-2.0 palm_static_pg_lib.connect_walls.
+        for d, (wdx, wdy) in enumerate(self.cfg.walls.wall_directions):
+            wa = self.cfg.walls.wall_azimuth[d]
+            # coordinates/geometry of the cell edge facing direction d; the same
+            # 25 parameters as the outer walls, followed by the neighbour offset
+            edge_params = (
+                d + 1, wa, 90, wdx, self.cfg.domain.dx / 2.0, self.cfg.domain.origin_x, wdy, self.cfg.domain.dy / 2.0,
+                self.cfg.domain.origin_y,
+                wdx, self.cfg.domain.dx / 2.0, wdy, self.cfg.domain.dy / 2.0, wdy, wdx, self.cfg.domain.dx,
+                wdx, wdy, self.cfg.domain.dy, wdy, wdx, self.cfg.domain.dx, wdx, wdy,
+                self.cfg.domain.dy, self.cfg.srid_palm, wdx, wdy
+            )
+            edge_geom = """
+                st_setsrid(st_makeline(
+                    st_makepoint(
+                        case when %s = 0 then (g.xmi + g.xma + (%s) * %s) / 2 else g.xmi end,
+                        case when %s = 0 then (g.ymi + g.yma + (%s) * %s) / 2 else g.ymi end),
+                    st_makepoint(
+                        case when %s = 0 then (g.xmi + g.xma + (%s) * %s) / 2 else g.xma end,
+                        case when %s = 0 then (g.ymi + g.yma + (%s) * %s) / 2 else g.yma end)), %s)"""
+
+            # inner walls: the neighbour building starts higher (overhang) or
+            # has a bottom while this cell has none
+            sql_inner = f"""
+                insert into "{self.cfg.domain.case_schema}"."{self.cfg.tables.building_walls}"
+                (id, direction, azimuth, zenith, nz_min, nz_max, isroof, xs, ys, xcen, ycen, wid, rid, inner_wall, geom)
+                select b.id, %s, %s, %s, case when bn.has_bottom then b.nz_min else 0 end, bn.nz_min, false,
+                g.xcen + %s * %s - %s, g.ycen + %s * %s - %s, g.xcen + %s * %s, g.ycen + %s * %s, null, null, true,
+                {edge_geom}
+                from "{self.cfg.domain.case_schema}"."{self.cfg.tables.buildings_grid}" b
+                join "{self.cfg.domain.case_schema}"."{self.cfg.tables.buildings_grid}" bn on bn.i = b.i + (%s) and bn.j = b.j + (%s)
+                join "{self.cfg.domain.case_schema}"."{self.cfg.tables.grid}" g on g.id = b.id
+                where b.nz_min < bn.nz_min
+                   or ((not b.has_bottom or b.has_bottom is null) and bn.has_bottom)
+            """
+            self.execute(sql_inner, edge_params)
+
+            # roof vertical surfaces: steps where this roof (incl. its
+            # artificial elevation) is higher than the neighbouring one
+            sql_roof_step = f"""
+                insert into "{self.cfg.domain.case_schema}"."{self.cfg.tables.building_walls}"
+                (id, direction, azimuth, zenith, nz_min, nz_max, isroof, xs, ys, xcen, ycen, wid, rid, inner_wall, geom)
+                select b.id, %s, %s, %s, d.nz - bob.difference_int, b.nz, true,
+                g.xcen + %s * %s - %s, g.ycen + %s * %s - %s, g.xcen + %s * %s, g.ycen + %s * %s, null, null, false,
+                {edge_geom}
+                from "{self.cfg.domain.case_schema}"."{self.cfg.tables.buildings_grid}" b
+                join "{self.cfg.domain.case_schema}"."{self.cfg.tables.buildings_grid}" d on d.i = b.i + (%s) and d.j = b.j + (%s)
+                join "{self.cfg.domain.case_schema}"."{self.cfg.tables.buildings_offset}" bob on b.lid = bob.lid
+                join "{self.cfg.domain.case_schema}"."{self.cfg.tables.buildings_offset}" bod on d.lid = bod.lid
+                join "{self.cfg.domain.case_schema}"."{self.cfg.tables.grid}" g on g.id = b.id
+                where b.nz + bob.max_int > d.nz + bod.max_int
+                  and not b.is_bridge
+            """
+            self.execute(sql_roof_step, edge_params)
+
+        debug('connecting walls with their wall lines (material properties)')
+        self.execute(f"""
+            update "{self.cfg.domain.case_schema}"."{self.cfg.tables.building_walls}" b
+            set wid = (
+                select w.{self.cfg.idx.walls} from "{self.cfg.domain.case_schema}"."{self.cfg.tables.walls}" w
+                order by w.geom <-> st_setsrid(st_point(b.xcen, b.ycen), %s) limit 1
+            )
+            where not b.isroof
+        """, (self.cfg.srid_palm,))
+
+        debug('connecting roof vertical surfaces with their roofs')
+        self.execute(f"""
+            update "{self.cfg.domain.case_schema}"."{self.cfg.tables.building_walls}" b
+            set rid = (
+                select r.{self.cfg.idx.roofs} from "{self.cfg.domain.case_schema}"."{self.cfg.tables.roofs}" r
+                order by r.geom <-> st_setsrid(st_point(b.xcen, b.ycen), %s) limit 1
+            )
+            where b.isroof
+        """, (self.cfg.srid_palm,))
 
         # 4. create and populate surfaces table
         debug('preparing individual building surfaces table')
-        extra_col = ', eid integer ' if self.cfg.tables.extras_shp in self.vtabs else ''
+        extra_col = ', eid integer ' if self.cfg.tables.extras_shp in self.cfg.vtabs else ''
         sql_surf_table = f"""
             create table if not exists "{self.cfg.domain.case_schema}"."{self.cfg.tables.surfaces}" (
                 sid integer not null, direction integer, zs double precision, 
@@ -2522,6 +2672,39 @@ class InitializeDomainTask(BaseTask):
         """
         self.execute(sql_horiz_up,
                      (self.cfg.domain.origin_x, self.cfg.domain.origin_y, self.cfg.domain.dz, direction_up))
+
+        # 5b. 3-D buildings: upward faces of bridges and downward faces under
+        # overhangs/bridges (also lost in the 2.0 rewrite; restored from the
+        # pre-2.0 connect_walls)
+        if self.cfg.has_3d_buildings and self.cfg.tables.extras_shp in self.cfg.vtabs:
+            max_sid = self.fetchone(
+                f'select coalesce(max(sid), -1) + 1 from "{self.cfg.domain.case_schema}"."{self.cfg.tables.surfaces}"')
+            progress('inserting horizontal bridge surfaces, upward facing')
+            self.execute(f"""
+                insert into "{self.cfg.domain.case_schema}"."{self.cfg.tables.surfaces}"
+                (sid, xs, ys, zs, direction, azimuth, zenith, ishorizontal, isroof, gid, rid, wid, eid)
+                select row_number() over (order by g.id) - 1 + %s,
+                g.xcen - %s, g.ycen - %s, b.nz * %s, %s, b.azimuth, b.zenith,
+                true, true, b.id, null, null, b.lid_extra
+                from "{self.cfg.domain.case_schema}"."{self.cfg.tables.buildings_grid}" b
+                left outer join "{self.cfg.domain.case_schema}"."{self.cfg.tables.grid}" g on g.id = b.id
+                where b.nz is not null and b.type = {self.cfg.type_range.bridge}
+            """, (max_sid, self.cfg.domain.origin_x, self.cfg.domain.origin_y, self.cfg.domain.dz, direction_up))
+
+            max_sid = self.fetchone(
+                f'select coalesce(max(sid), -1) + 1 from "{self.cfg.domain.case_schema}"."{self.cfg.tables.surfaces}"')
+            progress('inserting horizontal surfaces, downward facing')
+            direction_down = 5
+            self.execute(f"""
+                insert into "{self.cfg.domain.case_schema}"."{self.cfg.tables.surfaces}"
+                (sid, xs, ys, zs, direction, azimuth, zenith, ishorizontal, isroof, gid, rid, wid, eid)
+                select row_number() over (order by g.id) - 1 + %s,
+                g.xcen - %s, g.ycen - %s, b.nz_min * %s, %s, b.azimuth, 180,
+                true, false, b.id, null, null, b.lid_extra
+                from "{self.cfg.domain.case_schema}"."{self.cfg.tables.buildings_grid}" b
+                left outer join "{self.cfg.domain.case_schema}"."{self.cfg.tables.grid}" g on g.id = b.id
+                where b.has_bottom
+            """, (max_sid, self.cfg.domain.origin_x, self.cfg.domain.origin_y, self.cfg.domain.dz, direction_down))
 
         # 6. vertical surfaces via stored procedure
         debug('generating vertical surfaces via palm_vertical_surfaces')
@@ -2688,38 +2871,14 @@ class InitializeDomainTask(BaseTask):
         if self.cfg.tables.impervious in self.cfg.rtabs:
             progress('imperviousness data is present; preparing correction table')
             self.cfg._settings['impervious'] = True
-
-            # identify cells classified as 202 (sealed) that have <= 50% imperviousness
-            query = f"""
-                drop table if exists impervious_correction;
-                create temp table impervious_correction as
-                select 
-                    g.id, 
-                    3 as new_type
-                from "{self.cfg.domain.case_schema}"."{self.cfg.tables.grid}" g
-                    join "{self.cfg.domain.case_schema}"."{self.cfg.tables.landcover}" l on l.lid = g.lid
-                    join lateral (
-                        select st_nearestvalue(rast, g.point) as impervious_value
-                        from "{self.cfg.domain.case_schema}"."{self.cfg.tables.impervious}" 
-                        where st_intersects(tile_extent, g.point)
-                        limit 1
-                    ) r on true 
-                where l.type = 202
-                    and r.impervious_value <= 50;
-            """
         else:
             debug('imperviousness data not found; creating empty correction table')
             self.cfg._settings['impervious'] = False
-            query = """
-                drop table if exists impervious_correction;
-                create temp table impervious_correction as
-                select 
-                    -999999 as id, 
-                    103 as new_type
-                limit 0;
-            """
 
-        self.execute(query)
+        # identify cells classified as 202 (sealed) that have <= 50%
+        # imperviousness; the SQL is shared with the staged-run path
+        # (capabilities.ensure_impervious_correction) so both stay identical
+        build_impervious_correction(self.cfg, self.db, self.cfg._settings['impervious'])
 
         # note: the actual update of the grid table usually happens in a
         # separate synchronization step using the 'impervious_correction' table.
@@ -2746,24 +2905,38 @@ class InitializeDomainTask(BaseTask):
 
 
     def domain_and_buildings_height_operations(self):
-        """ A placeholder for operation for domain and building height. """
+        """ Domain and building height operations, in the pre-2.0 order
+        (connect_buildings_height of palm_static_pg_lib): heights, building
+        offset, topography fills, the CCT minimum building height, and the
+        boundary fill once at the end. The 2.0 rewrite had added a second,
+        earlier fill_near_boundary and moved the CCT step before the offset. """
         self.fill_missing_holes_in_grid()
 
         self.connect_buildings_height()
 
         self._define_building_offset()
 
-        self.fill_near_boundary()
-
         self._run_all_topo_fills()
 
+        self._apply_cct_min_building_height()
+
         self.fill_near_boundary()
 
+    def _apply_cct_min_building_height(self):
+        """ cut-cell topography needs buildings of at least 3 levels """
+        if self.cfg.do_cct:
+            self.execute(f'update "{self.cfg.domain.case_schema}"."{self.cfg.tables.buildings_grid}" '
+                         f'set nz = 3, height = 3 * %s where nz < 3 or height < 3 * %s', (self.cfg.domain.dz, self.cfg.domain.dz))
+
     def process_usm(self):
-        """ A placeholder for processing USM. """
+        """ Urban surfaces, in the pre-2.0 order (main_palm_static): CCT outer
+        walls/roofs, LOD2 roofs and walls, then the cyclic boundary condition
+        last so that nothing after it modifies the boundary rows. """
+        if self.cfg.do_cct:
+            self.create_outer_walls_and_roofs_cct()
+
         self.connect_roofs()
 
         self.connect_walls()
 
-        if self.cfg.do_cct:
-            self.create_outer_walls_and_roofs_cct()
+        self.update_force_cyclic()

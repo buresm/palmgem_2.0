@@ -119,6 +119,20 @@ class LoggerWriter:
 Log_Format = "{asctime:20s} {source:15s} - {message}"
 
 
+class EnsureSourceFilter(logging.Filter):
+    """Third-party libraries (pyogrio/GDAL, ...) log records without the
+    'source' extra that Log_Format requires. Without this filter every such
+    record crashes the handler's formatter, and Python logging then dumps a
+    '--- Logging error ---' report to stderr — which the stderr redirect
+    re-logs as a wall of ERROR lines. Fill the field from the level name so
+    foreign records simply format."""
+
+    def filter(self, record):
+        if not hasattr(record, 'source'):
+            record.source = record.levelname
+        return True
+
+
 def setup_logging(cfg):
     """Initializes logging based on the ConfigObj settings."""
     # Ensure the log path exists (critical for Docker)
@@ -136,12 +150,19 @@ def setup_logging(cfg):
         ]
     )
 
+    # handler-level filter: logger-level filters do not run for records
+    # propagated from library loggers, handler filters do
+    ensure_source = EnsureSourceFilter()
+    for handler in logging.getLogger().handlers:
+        handler.addFilter(ensure_source)
+
     # Redirect stderr to the logger
     sys.stderr = LoggerWriter(error)
 
     # Silence chatty libraries
     logging.getLogger("matplotlib").setLevel(logging.WARNING)
     logging.getLogger("fiona").setLevel(logging.WARNING)  # Common in GIS
+    logging.getLogger("pyogrio").setLevel(logging.WARNING)  # GPKG writer progress
 
 
 def change_log_level(new_level):

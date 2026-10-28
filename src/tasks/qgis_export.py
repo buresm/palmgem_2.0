@@ -1,31 +1,36 @@
-"""QGIS project export: a styled .qgs pointing at the case schema in PostGIS.
+"""QGIS export: a styled GeoPackage snapshot of the case schema.
 
-Generates one QGIS 3.x project file per case with pre-styled layers —
-landcover categorised by PALM type (vegetation greens / pavement greys /
-water blues / building reds), building grid graduated by height, SLURB
-centerlines, etc. Only layers actually present in the case schema are
-included. The database password is left out of the project unless
-``qgis_export.include_password`` is enabled (QGIS will prompt once and can
-store the credential itself).
+Writes ``output/<case>.gpkg`` with every case-schema layer that exists,
+plus the standard QGIS ``layer_styles`` table so the styling auto-applies
+when the file is opened — landcover categorised by PALM type (vegetation
+greens / pavement greys / water blues / building reds), building grid
+graduated by height, SLURB centerlines, etc.
+
+The GeoPackage is written through geopandas/GDAL, which embeds the full CRS
+definition from PostGIS per layer — QGIS then georeferences the data itself,
+with no hand-written CRS information involved (an earlier .qgs-based export
+misplaced the data when QGIS could not resolve the hand-crafted CRS block).
 """
 import os
+import sqlite3
 import xml.etree.ElementTree as ET
-from xml.dom import minidom
+
+import geopandas as gpd
 
 from .base import BaseTask
 from src.logger import progress, debug, verbose, warning
 
-# candidate layers, top-of-tree first: (logical key for cfg.tables/cfg.idx,
-# checked-by-default, renderer kind)
+# candidate layers, top-of-tree first: (logical key for cfg.tables,
+# renderer kind)
 _LAYER_CANDIDATES = [
-    ('centerline', True, 'line_or_point'),
-    ('trees', True, 'single'),
-    ('buildings_grid', True, 'graduated_height'),
-    ('building_area', False, 'single'),
-    ('walls', False, 'single'),
-    ('roofs', False, 'single'),
-    ('landcover', True, 'categorized_type'),
-    ('grid', False, 'single'),
+    ('centerline', 'single'),
+    ('trees', 'single'),
+    ('buildings_grid', 'graduated_height'),
+    ('building_area', 'single'),
+    ('walls', 'single'),
+    ('roofs', 'single'),
+    ('landcover', 'categorized_type'),
+    ('grid', 'single'),
 ]
 
 # base colours per PALM type century (r, g, b)
@@ -57,20 +62,13 @@ def colour_for_type(palm_type):
 
 
 def _geometry_flavour(pg_type):
-    """Map a PostGIS geometry type to the maplayer 'geometry' attribute."""
+    """Map a PostGIS/OGC geometry type to the symbol flavour."""
     t = (pg_type or '').upper()
     if 'POINT' in t:
         return 'Point'
     if 'LINE' in t:
         return 'Line'
     return 'Polygon'
-
-
-_WKB_NAMES = {
-    'POINT': 'Point', 'MULTIPOINT': 'MultiPoint',
-    'LINESTRING': 'LineString', 'MULTILINESTRING': 'MultiLineString',
-    'POLYGON': 'Polygon', 'MULTIPOLYGON': 'MultiPolygon',
-}
 
 
 def _symbol(el_symbols, name, geometry, rgb, outline_width='0.12'):
@@ -138,98 +136,50 @@ def _renderer(parent, layer):
     _symbol(syms, '0', geometry, layer.get('colour', _DEFAULT_COLOUR))
 
 
-def _crs_element(parent, crs):
-    """Write a complete spatialrefsys element. QGIS cannot reconstruct a CRS
-    from the authid alone — without wkt/proj4 the project opens with an
-    unknown CRS and the layers land in the wrong place on the world map."""
-    srs = ET.SubElement(parent, 'spatialrefsys', {'nativeFormat': 'Wkt'})
-    ET.SubElement(srs, 'wkt').text = crs.get('wkt', '')
-    ET.SubElement(srs, 'proj4').text = crs.get('proj4', '')
-    ET.SubElement(srs, 'srid').text = str(crs['srid'])
-    ET.SubElement(srs, 'authid').text = f"EPSG:{crs['srid']}"
-    ET.SubElement(srs, 'description').text = crs.get('description', '')
-    ET.SubElement(srs, 'geographicflag').text = 'true' if crs.get('geographic') else 'false'
-
-
-def build_qgis_project(title, crs, extent, layers):
-    """Build the .qgs project XML string from collected layer descriptions.
-
-    ``crs``: dict with srid, wkt, proj4, description, geographic.
-    ``layers``: list of dicts with keys name, schema, table, geom_col, key,
-    pg_type, geometry, checked, renderer (+ categories / height_range /
-    colour / datasource connection parts).
-    """
-    qgis = ET.Element('qgis', {'projectname': title, 'version': '3.28.0'})
-    ET.SubElement(qgis, 'title').text = title
-
-    _crs_element(ET.SubElement(qgis, 'projectCrs'), crs)
-
-    tree = ET.SubElement(qgis, 'layer-tree-group')
-    project_layers = ET.SubElement(qgis, 'projectlayers')
-    order = ET.SubElement(qgis, 'layerorder')
-
-    for layer in layers:
-        layer_id = f"{layer['table']}_palmgem"
-        checked = 'Qt::Checked' if layer['checked'] else 'Qt::Unchecked'
-        ET.SubElement(tree, 'layer-tree-layer',
-                      {'id': layer_id, 'name': layer['name'], 'checked': checked,
-                       'expanded': '0', 'providerKey': 'postgres'})
-        ET.SubElement(order, 'layer', {'id': layer_id})
-
-        ml = ET.SubElement(project_layers, 'maplayer',
-                           {'type': 'vector', 'geometry': layer['geometry'],
-                            'autoRefreshEnabled': '0'})
-        ET.SubElement(ml, 'id').text = layer_id
-        ET.SubElement(ml, 'datasource').text = layer['datasource']
-        ET.SubElement(ml, 'layername').text = layer['name']
-        _crs_element(ET.SubElement(ml, 'srs'), crs)
-        ET.SubElement(ml, 'provider', {'encoding': 'UTF-8'}).text = 'postgres'
-        _renderer(ml, layer)
-
-    if extent:
-        canvas = ET.SubElement(qgis, 'mapcanvas', {'name': 'theMapCanvas'})
-        ET.SubElement(canvas, 'units').text = 'meters'
-        ext = ET.SubElement(canvas, 'extent')
-        for tag, val in zip(('xmin', 'ymin', 'xmax', 'ymax'), extent):
-            ET.SubElement(ext, tag).text = f'{val:.2f}'
-        _crs_element(ET.SubElement(canvas, 'destinationsrs'), crs)
-
-    raw = ET.tostring(qgis, encoding='unicode')
-    pretty = minidom.parseString(raw).toprettyxml(indent='  ')
-    # minidom adds its own xml declaration; insert the qgis doctype after it
-    lines = pretty.split('\n')
-    lines.insert(1, "<!DOCTYPE qgis PUBLIC 'http://mrcc.com/qgis.dtd' 'SYSTEM'>")
-    return '\n'.join(line for line in lines if line.strip())
+def build_layer_qml(layer):
+    """Symbology-only QML document for one layer, stored in the GeoPackage
+    layer_styles table and auto-applied by QGIS on load."""
+    qgis = ET.Element('qgis', {'version': '3.28.0', 'styleCategories': 'Symbology'})
+    _renderer(qgis, layer)
+    body = ET.tostring(qgis, encoding='unicode')
+    return ("<!DOCTYPE qgis PUBLIC 'http://mrcc.com/qgis.dtd' 'SYSTEM'>\n" + body)
 
 
 class QgisExportTask(BaseTask):
-    """Write output/<case>.qgs with all case-schema layers that exist."""
+    """Write output/<case>.gpkg with all case-schema layers + default styles."""
 
     def run(self):
         schema = self.cfg.domain.case_schema
+
+        gpkg_file = self.cfg.qgis_export.gpkg_file or os.path.join(
+            'output', f'{schema}.gpkg')
+        os.makedirs(os.path.dirname(gpkg_file) or '.', exist_ok=True)
+        if os.path.exists(gpkg_file):
+            try:
+                os.remove(gpkg_file)
+            except PermissionError:
+                # typically the snapshot is open in QGIS while the pipeline
+                # re-runs; skip the export rather than aborting the run
+                warning(f'qgis_export: {gpkg_file} is locked (open in QGIS?); '
+                        'close it and re-run the qgis_export task')
+                return
+
         layers = []
-        for logical, checked, renderer in _LAYER_CANDIDATES:
+        for logical, renderer in _LAYER_CANDIDATES:
             table = self.cfg.tables.get(logical, logical)
             info = self._geometry_info(schema, table)
             if info is None:
                 verbose(f'qgis_export: no table {table} in {schema}; skipping layer')
                 continue
             geom_col, pg_type = info
-            geometry = _geometry_flavour(pg_type)
 
             layer = {
                 'name': logical,
-                'schema': schema,
                 'table': table,
-                'geom_col': geom_col,
-                'pg_type': pg_type,
-                'geometry': geometry,
-                'checked': checked,
-                'renderer': 'single' if renderer == 'line_or_point' else renderer,
+                'geometry': _geometry_flavour(pg_type),
+                'renderer': renderer,
                 'colour': _SINGLE_COLOURS.get(logical, _DEFAULT_COLOUR),
-                'key': self.cfg.idx.get(logical, 'gid'),
             }
-
             if renderer == 'categorized_type':
                 layer['categories'] = [r[0] for r in self.fetch(
                     f'select distinct type from "{schema}"."{table}" '
@@ -242,46 +192,56 @@ class QgisExportTask(BaseTask):
                 else:
                     layer['renderer'] = 'single'
 
-            layer['datasource'] = self._datasource(layer)
+            debug(f'qgis_export: reading layer {logical} <- "{schema}"."{table}"')
+            gdf = gpd.read_postgis(
+                f'select * from "{schema}"."{table}"',
+                self.db.engine, geom_col=geom_col)
+            if gdf.crs is None:
+                gdf = gdf.set_crs(epsg=self.cfg.srid_palm)
+            gdf.to_file(gpkg_file, layer=logical, driver='GPKG')
+
             layers.append(layer)
-            debug(f'qgis_export: layer {logical} -> {table} ({pg_type})')
+            verbose(f'qgis_export: wrote layer {logical} ({len(gdf)} features, '
+                    f'crs {gdf.crs})')
 
         if not layers:
             warning(f'qgis_export: no exportable tables found in schema {schema}')
             return
 
-        # derive the extent from the domain centre so the task also works
-        # standalone (origin_x/y only exist after SetupTask ran in-process)
-        d = self.cfg.domain
-        half_w, half_h = d.nx * d.dx / 2.0, d.ny * d.dy / 2.0
-        extent = (d.cent_x - half_w, d.cent_y - half_h,
-                  d.cent_x + half_w, d.cent_y + half_h)
+        self._write_styles(gpkg_file, layers)
+        progress('qgis_export written: {} ({} layer(s), styles embedded)',
+                 gpkg_file, len(layers))
 
-        xml = build_qgis_project(schema, self._crs_definition(), extent, layers)
+    def _write_styles(self, gpkg_file, layers):
+        """Embed one default QML style per layer via the standard QGIS
+        layer_styles table (the 'save style in database' mechanism)."""
+        con = sqlite3.connect(gpkg_file)
+        try:
+            # geometry column name as GDAL actually wrote it
+            geom_cols = dict(con.execute(
+                'select table_name, column_name from gpkg_geometry_columns'))
 
-        project_file = self.cfg.qgis_export.project_file or os.path.join(
-            'output', f'{schema}.qgs')
-        os.makedirs(os.path.dirname(project_file) or '.', exist_ok=True)
-        with open(project_file, 'w', encoding='utf-8') as f:
-            f.write(xml)
-        progress('qgis_export written: {} ({} layer(s))', project_file, len(layers))
-        if not self.cfg.qgis_export.include_password:
-            verbose('qgis_export: database password not embedded; QGIS will prompt on open')
-
-    def _crs_definition(self):
-        """Full CRS definition for srid_palm from PostGIS spatial_ref_sys."""
-        srid = self.cfg.srid_palm
-        rows = self.fetch(
-            'select srtext, proj4text from spatial_ref_sys where srid = %s', (srid,))
-        wkt, proj4 = rows[0] if rows else ('', '')
-        description = wkt.split('"')[1] if wkt and '"' in wkt else f'EPSG:{srid}'
-        return {
-            'srid': srid,
-            'wkt': wkt or '',
-            'proj4': proj4 or '',
-            'description': description,
-            'geographic': '+proj=longlat' in (proj4 or ''),
-        }
+            con.execute("""
+                create table if not exists layer_styles (
+                    id integer primary key autoincrement,
+                    f_table_catalog text, f_table_schema text, f_table_name text,
+                    f_geometry_column text, styleName text, styleQML text,
+                    styleSLD text, useAsDefault boolean, description text,
+                    owner text, ui text,
+                    update_time datetime default current_timestamp)
+            """)
+            for layer in layers:
+                qml = build_layer_qml(layer)
+                con.execute(
+                    'insert into layer_styles (f_table_catalog, f_table_schema, '
+                    'f_table_name, f_geometry_column, styleName, styleQML, '
+                    'styleSLD, useAsDefault, description, owner, ui) '
+                    "values ('', '', ?, ?, ?, ?, '', 1, 'PALM-GeM default style', '', '')",
+                    (layer['name'], geom_cols.get(layer['name'], 'geom'),
+                     f"{layer['name']}_palmgem", qml))
+            con.commit()
+        finally:
+            con.close()
 
     def _geometry_info(self, schema, table):
         """(geom_column, geometry_type) from geometry_columns, or None."""
@@ -301,22 +261,3 @@ class QgisExportTask(BaseTask):
             if probe:
                 pg_type = probe[0][0].upper()
         return geom_col, pg_type
-
-    def _datasource(self, layer):
-        db = self.cfg.database
-        parts = [
-            f"dbname='{db.database}'",
-            f"host={db.host}",
-            f"port={db.get('port', 5432)}",
-            f"user='{db.user}'",
-        ]
-        if self.cfg.qgis_export.include_password:
-            parts.append(f"password='{db.password}'")
-        parts += [
-            'sslmode=disable',
-            f"key='{layer['key']}'",
-            f"srid={self.cfg.srid_palm}",
-            f"type={_WKB_NAMES.get((layer['pg_type'] or '').upper(), 'Geometry')}",
-            f'table="{layer["schema"]}"."{layer["table"]}" ({layer["geom_col"]})',
-        ]
-        return ' '.join(parts)

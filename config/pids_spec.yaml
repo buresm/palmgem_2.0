@@ -29,6 +29,11 @@ static:
         - origin_time
         - rotation_angle
     required_dimensions: [x, y]
+    # cross-variable surface rules (src/utils/pids.py check_static_consistency;
+    # value = rule set: static | slurb, True = static):
+    # zt everywhere, one surface type per cell, building vars on the same
+    # cells, no zero-height buildings, soil under vegetation/pavement
+    consistency_checks: static
     coordinate_variables: [x, y, z, zlad, zsoil]
     exempt_variables: [crs, E_UTM, N_UTM, lon, lat]
     variable_rules:
@@ -72,6 +77,12 @@ static:
             required_attrs: [long_name, _FillValue]
 
 slurb:
+    # SLURB rules (src/utils/pids.py check_slurb_consistency), from PIDS_SLURB
+    # and the SLUrb guide: plan <= urban fraction, fractions in [0, 1], height
+    # and aspect ratio > 0, orientation in [0, 360) or fill (isotropic);
+    # warnings for SLUrb cells (urban_fraction >= 1 %) missing plan/height/H/W,
+    # heights > 60 m and values in cells SLUrb ignores
+    consistency_checks: slurb
     required_global_attributes:
         - Conventions
         - origin_x

@@ -82,6 +82,19 @@ class LadGenerator(BaseTask):
         sql_owner = f'alter table "{self.cfg.domain.case_schema}"."{self.cfg.tables.trees_grid}" owner to {self.cfg.pg_owner}'
         self.execute(sql_owner)
 
+        # 7. optional constant LAD in the whole tree volume (pre-2.0 option
+        # trees.constant_lad, "add custom fix lad"; lost in the 2.0 rewrite):
+        # every cell with leaves gets constant_lad_val, BAD = bad_coef * it
+        if self.cfg.trees.get('constant_lad', False):
+            lad_val = float(self.cfg.trees.constant_lad_val)
+            progress('forcing constant tree LAD {} (BAD {})', lad_val, self.cfg.trees.bad_coef * lad_val)
+            for level in range(nzlad):
+                self.execute(f"""
+                    update "{self.cfg.domain.case_schema}"."{self.cfg.tables.trees_grid}"
+                    set "lad_{level}" = %s, "bad_{level}" = %s * %s
+                    where "lad_{level}" > 0
+                """, (lad_val, self.cfg.trees.bad_coef, lad_val))
+
         progress('LAD grid complete ({} vertical layers)', nzlad)
         return True
 

@@ -1,0 +1,17 @@
+.venv
+.pytest_cache
+.idea
+old_files
+.env
+*.log
+output/
+logs/
+visual_check/
+__pycache__/
+*.pyc
+# local GIS input data (large; not part of the repo — examples/ holds the shipped samples)
+gis_sources/
+# editor / agent local state
+.zed/
+.claude/scheduled_tasks.lock
+.claude/settings.local.json

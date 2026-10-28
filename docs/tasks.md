@@ -37,14 +37,14 @@ Two schemas hold all state:
 | `initialize_domain` | `InitializeDomainTask` | `input_schema` tables + `surface_params_file` CSV (LOD2) | `case_schema.grid` + landcover/buildings/terrain/LSM/USM + `surface_params`; sets capability flags | `gis_import` (+ optional UA/OSM/DEM tasks) |
 | `lad` | `LadGenerator` | `case_schema` trees + grid | `trees_grid` (`lad_*`/`bad_*` columns) | `initialize_domain` |
 | `lai` | `LaiGenerator` | `case_schema` grid + LAI/canopy rasters | `lai`/`canopy_height` columns on grid | `initialize_domain` (+ imported LAI/canopy rasters) |
-| `prepare_slurb` | `PrepareSlurbInputs` | `input_schema` landcover (incl. building-type polygons) + buildings raster | `input_schema` centerline / `building_area` tables | `gis_import` |
+| `prepare_slurb` | `PrepareSlurbInputs` | `input_schema` landcover (incl. building-type polygons) + buildings raster | `input_schema` centerline / `building_area` / street-segment tables | `gis_import` |
 | `cct_processing` | `CctProcessing` | `case_schema` grid/landcover/buildings | slanted faces/vertices tables | `initialize_domain` (needs `do_cct: True`) |
 | `static_driver` | `StaticDriverGen` | `case_schema.grid` + parameter tables in config | `output/<case>_static.nc` | `initialize_domain` (+ `lad`/`lai` if you want trees) |
 | `slurb_driver` | `SlurbDriverGen` | `case_schema` grid + SLURB inputs | `output/<case>_slurb.nc` | `prepare_slurb`, then `initialize_domain` to copy its tables into the case schema (needs `slurb: True`) |
 | `cct_driver` | `CCTDriverGen` | slanted-face tables | slanted NetCDF | `cct_processing` |
 | `qa_report` | `QaReportTask` | driver NetCDFs + `case_schema` tables | `output/<case>_qa_report.html` (variable maps/histograms, PIDS findings, landcover/building stats, task timings) | the driver task(s) whose output it should analyse |
 | `pids_check` | `PidsCheckTask` | driver NetCDFs | log findings (PIDS compliance) | the driver task(s); also runs automatically after each driver when `pids.enabled` |
-| `qgis_export` | `QgisExportTask` | `case_schema` tables | `output/<case>.qgs` styled QGIS project (PostGIS layers) | `initialize_domain` (any subset of tables works) |
+| `qgis_export` | `QgisExportTask` | `case_schema` tables | `output/<case>.gpkg` styled GeoPackage snapshot (QGIS-ready, per-layer default styles embedded) | `initialize_domain` (any subset of tables works) |
 | `finalize` | `FinalizeTask` | — | — | — (always runs) |
 
 > The driver tasks (`static_driver`, `slurb_driver`, `cct_processing`/`cct_driver`) depend on
@@ -54,7 +54,9 @@ Two schemas hold all state:
 > sentinel). When a driver task is run on its own — i.e. in a *separate process* from
 > `initialize_domain` — these are rebuilt automatically from the persisted `case_schema`
 > (`oro_min` from the grid's minimum cell height; see `src/utils/capabilities.py`), so the
-> task runs independently. No extra configuration is needed.
+> task runs independently. The same applies to the session-only `impervious_correction`
+> table the static driver joins (rebuilt from the case schema's impervious raster, or empty),
+> and a missing LAI canopy is simply skipped. No extra configuration is needed.
 
 ## Config keys that must match across runs
 
@@ -139,10 +141,18 @@ fresh each time, the variant runs need nothing from the populate run beyond the 
   `prepare_slurb` (and set `slurb: True`) before `slurb_driver`.
 - `prepare_slurb` builds its `centerline`/`building_area` tables in the **input schema**, from
   an input landcover that must already contain building-type polygons (900–999) next to street
-  polygons (201–203). `initialize_domain` then copies the two tables into the case schema —
-  and it drops and rebuilds the whole case schema each run, so `slurb_driver` always needs an
+  polygons (201–203). `initialize_domain` then copies them (plus the street centreline
+  segments used for the canyon-orientation check) into the case schema — and it drops and
+  rebuilds the whole case schema each run, so `slurb_driver` always needs an
   `initialize_domain` run *after* `prepare_slurb` in the pipeline order.
+- In SLURB mode the two drivers share the cells: SLUrb models the urban part
+  (`urban_fraction` = buildings + streets) of every cell whose building plan fraction —
+  averaged over the `slurb_reference_size` window (100 m) — reaches `min_plan_area`; the
+  static driver keeps the real LSM surface types elsewhere and gives those cells their dominant
+  non-urban type. Run `static_driver` and `slurb_driver` against the same case schema and
+  config. Details: [SLURB settings](configuration_docs.md#slurb-single-layer-urban-model-driver).
 - `static_driver_file` (and `slurb_driver_file`) default to `output/<case_schema>_static.nc`.
   Override them per run to keep parameter variants side by side.
-- Running everything in one config (`run_tasks: [gis_import, setup, initialize_domain,
-  static_driver, finalize]`) still works exactly as before — staging is optional.
+- Running everything in one config (`run_tasks: [gis_import, initialize_domain,
+  static_driver]`) still works exactly as before — staging is optional. `setup` and
+  `finalize` always run implicitly; listing them does no harm.

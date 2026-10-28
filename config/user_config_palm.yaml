@@ -33,6 +33,13 @@ run_tasks:
 
 input_schema: 'inputs_carmine_prague_example_temp'
 
+# Prague is UTM zone 33N; without these the 32632 defaults apply and the grid
+# is built in the wrong zone, so no input data intersects it
+srid: 32633
+srid_input: 32633
+srid_palm: 32633
+srid_utm: 32633
+
 domain:
     name: 'prague'
     scenario: 'example'

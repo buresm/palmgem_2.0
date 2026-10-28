@@ -21,12 +21,12 @@
 # A small (500 x 400 m, 1 m) detailed urban domain with 3D buildings, vertical
 # walls, roofs and individual trees. Run from the repository root with:
 #
-#     python main.py -c ../examples/prague_lod2/prague_lod2.yaml
+#     python main.py -c examples/prague_lod2/prague_lod2.yaml
 #
-# The -c path is resolved relative to the config/ directory, so the ../ steps
-# back out to the example. All data lives in examples/prague_lod2/files/ and is
-# already projected to EPSG:32633 (UTM 33N). Edit the database block below and
-# the executable paths at the bottom to match your machine.
+# (-c is looked up in config/ first, then taken as given). All data lives in
+# examples/prague_lod2/files/ and is already projected to EPSG:32633 (UTM 33N).
+# Edit the database block below and the executable paths at the bottom to match
+# your machine.
 # ===========================================================================
 
 # --- PostgreSQL / PostGIS connection (EDIT THESE) --------------------------

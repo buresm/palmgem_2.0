@@ -6,13 +6,13 @@ PALM-GeM runs a configurable sequence of tasks. Each task extends `BaseTask` and
 
 `setup` and `finalize` always run implicitly (first and last). Only the tasks listed in `run_tasks` in your user config run in between.
 
-See [CLAUDE.md](../CLAUDE.md) or the source in `src/tasks/` for the full task list.
+See [tasks.md](tasks.md) for the full task list, what each task reads and writes, and how to split the pipeline across several runs.
 
 ---
 
 ## Logging
 
-Six log levels control how much output is printed to the terminal and written to `logs/<name><scenario>.log`.
+Six log levels control how much output is printed to the terminal and written to the log file `logs/<case_schema>` (`<domain.name>_<domain.scenario>`; each run of the same case overwrites it).
 
 Configure with `logs.level` in your YAML (use the numeric value):
 

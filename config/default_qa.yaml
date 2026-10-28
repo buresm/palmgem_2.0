@@ -13,7 +13,7 @@ pids:
 qa_report:
     report_file: ''                # default: output/<case_schema>_qa_report.html
 
-# qgis_export task: styled QGIS project pointing at the case schema.
+# qgis_export task: styled GeoPackage snapshot of the case schema
+# (QGIS-ready; per-layer default styles embedded via layer_styles).
 qgis_export:
-    project_file: ''               # default: output/<case_schema>.qgs
-    include_password: False        # embed the DB password in the project file
+    gpkg_file: ''                  # default: output/<case_schema>.gpkg

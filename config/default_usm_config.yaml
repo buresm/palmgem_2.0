@@ -105,7 +105,7 @@ building_pars:
     97: 'p.conductivity_surf'
     98: 'p.conductivity_surf'
     99: 'p.conductivity_volume'
-    100: 'r.emissivity'
+    100: 'pr.emissivity'
     101: '0'
     102: '0'
     105: '0.0'
@@ -130,13 +130,13 @@ building_albedo_type: #(building_surface_type,y,x)
 building_emissivity: #(building_surface_type,y,x)
     0: 'pg.emissivity'
     1: 'pu.emissivity'
-    2: 'r.emissivity'
+    2: 'pr.emissivity'
     3: 'pg.emissivity'
     4: 'pu.emissivity'
-    5: 'r.emissivity'
+    5: 'pr.emissivity'
     6: 'pg.emissivity'
     7: 'pu.emissivity'
-    8: 'r.emissivity'
+    8: 'pr.emissivity'
 
 building_fraction: #(building_surface_type,y,x)
     0: 'w.wallfracd'
@@ -193,6 +193,8 @@ building_transmissivity: #(building_surface_level,y,x)
 
 buildings_pars_depricated: False
 
+# roof albedo: a roofs-table value of 0 means unknown, so it falls back to the
+# roof material (pr) albedo; index 19 pd/b use albedo (was emissivity by mistake)
 building_surface_pars:
     0: ['1', 'w.wallfracd', 'w.wallfracu', '1', '1']
     1: ['0', 'w.winfracd', 'w.winfracu', '0', '0']
@@ -207,21 +209,21 @@ building_surface_pars:
     10: ['pr.conductivity_volume', 'pg.conductivity_volume', 'pu.conductivity_volume', 'pd.conductivity_volume', 'b.conductivity_volume']
     11: 297
     12: 295
-    13: ['r.emissivity', 'pg.emissivity', 'pu.emissivity', 'pd.emissivity', 'b.emissivity']
-    14: ['r.emissivity', 'pg.emissivity', 'pu.emissivity', 'pd.emissivity', 'b.emissivity']
-    15: ['r.emissivity', 'pg.emissivity', 'pu.emissivity', 'pd.emissivity', 'b.emissivity']
+    13: ['pr.emissivity', 'pg.emissivity', 'pu.emissivity', 'pd.emissivity', 'b.emissivity']
+    14: ['pr.emissivity', 'pg.emissivity', 'pu.emissivity', 'pd.emissivity', 'b.emissivity']
+    15: ['pr.emissivity', 'pg.emissivity', 'pu.emissivity', 'pd.emissivity', 'b.emissivity']
     16: 0.8
     17: ['pr.roughness',   'pg.roughness',    'pu.roughness',     'pd.roughness',    'b.roughness']
     18: ['pr.roughness_h', 'pg.roughness_h',  'pu.roughness_h',   'pd.roughness_h',  'b.roughness_h']
-    19: ['r.albedo',       'w.albedod',        'w.albedou',       'pd.emissivity',   'b.emissivity']
-    20: ['1-r.emissivity',  '1-pg.emissivity',  '1-pu.emissivity', '1-pd.emissivity', '1-b.emissivity']
-    21: ['r.albedo',       'w.albedod',        'w.albedou',       'pd.albedo',       'b.albedo']
-    22: ['r.albedo',       'w.albedod',        'w.albedou',       'pd.albedo',       'b.albedo']
-    23: ['1-r.emissivity',  '1-pg.emissivity',  '1-pu.emissivity', '1-pd.emissivity', '1-b.emissivity']
-    24: ['r.albedo',       'w.albedod',        'w.albedou',       'pd.albedo',       'b.albedo']
-    25: ['r.albedo',       'w.albedod',        'w.albedou',       'pd.albedo',       'b.albedo']
-    26: ['1-r.emissivity',  '1-pg.emissivity',  '1-pu.emissivity', '1-pd.emissivity', '1-b.emissivity']
-    27: ['r.albedo',       'w.albedod',        'w.albedou',       'pd.albedo',       'b.albedo']
+    19: ['coalesce(nullif(r.albedo, 0), pr.albedo)',       'w.albedod',        'w.albedou',       'pd.albedo',   'b.albedo']
+    20: ['1-pr.emissivity',  '1-pg.emissivity',  '1-pu.emissivity', '1-pd.emissivity', '1-b.emissivity']
+    21: ['coalesce(nullif(r.albedo, 0), pr.albedo)',       'w.albedod',        'w.albedou',       'pd.albedo',       'b.albedo']
+    22: ['coalesce(nullif(r.albedo, 0), pr.albedo)',       'w.albedod',        'w.albedou',       'pd.albedo',       'b.albedo']
+    23: ['1-pr.emissivity',  '1-pg.emissivity',  '1-pu.emissivity', '1-pd.emissivity', '1-b.emissivity']
+    24: ['coalesce(nullif(r.albedo, 0), pr.albedo)',       'w.albedod',        'w.albedou',       'pd.albedo',       'b.albedo']
+    25: ['coalesce(nullif(r.albedo, 0), pr.albedo)',       'w.albedod',        'w.albedou',       'pd.albedo',       'b.albedo']
+    26: ['1-pr.emissivity',  '1-pg.emissivity',  '1-pu.emissivity', '1-pd.emissivity', '1-b.emissivity']
+    27: ['coalesce(nullif(r.albedo, 0), pr.albedo)',       'w.albedod',        'w.albedou',       'pd.albedo',       'b.albedo']
 
 building_pars_repl:
     99999: [ [ 99999, 0.5 ], [ 99999, 0.5 ] ]

@@ -81,14 +81,17 @@ pavement_subsurface_pars:
 
 # calculation formulas for albedo_pars(nalbedo_pars,y,x)
 # [landcover, building roof, building wall (above ground floor level)]
+# aliases: l landcover, r roofs, pr roof surface_params (by r.material), w walls, pw upper wall surface_params
+# roof albedo: a roofs-table value of 0 means 'unknown' in practice (no real roof is black),
+# so it falls back to the roof material's surface_params albedo
 albedo_pars:
-    0: ['l.albedo',      'r.albedo',      'w.albedou']
-    1: ['1-l.emissivity', '1-r.emissivity', '1-pw.emissivity']
-    2: ['l.albedo',      'r.albedo',      'w.albedou']
-    3: ['1-l.emissivity', '1-r.emissivity', '1-pw.emissivity']
-    4: ['l.albedo',      'r.albedo',      'w.albedou']
-    5: ['1-l.emissivity', '1-r.emissivity', '1-pw.emissivity']
-    6: ['l.albedo',      'r.albedo',      'w.albedou']
+    0: ['l.albedo',      'coalesce(nullif(r.albedo, 0), pr.albedo)',      'w.albedou']
+    1: ['1-l.emissivity', '1-pr.emissivity', '1-pw.emissivity']
+    2: ['l.albedo',      'coalesce(nullif(r.albedo, 0), pr.albedo)',      'w.albedou']
+    3: ['1-l.emissivity', '1-pr.emissivity', '1-pw.emissivity']
+    4: ['l.albedo',      'coalesce(nullif(r.albedo, 0), pr.albedo)',      'w.albedou']
+    5: ['1-l.emissivity', '1-pr.emissivity', '1-pw.emissivity']
+    6: ['l.albedo',      'coalesce(nullif(r.albedo, 0), pr.albedo)',      'w.albedou']
 
 soil_moisture_adjust:
     35: 1.0

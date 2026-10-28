@@ -3,13 +3,25 @@ from vtk.util import numpy_support
 import matplotlib.pyplot  as plt
 import numpy as np
 import os
+import re
 from src.logger import debug, progress, verbose, warning, error, sql_debug, sql_verbose
+
+# driver fill values (config fill_values: f4/f8/i -9999, b -127)
+_PLOT_FILL_VALUES = (-9999.0, -127.0)
+
 
 def variable_visualization(var, x, y, var_name, par_id, text_id, path, scale=15, color_name='gist_rainbow', show_plots=False): #hsv
     """ create 2d plot from var 2d matrix"""
     # TODO: add posibility to directly add X, Y = lat, lon
     if not show_plots:
         plt.ioff()
+    # callers pass netCDF slices (masked) or plain arrays where missing values
+    # are the driver fill values; mask both, so the colour scale and the
+    # statistics describe the data and not -9999 / -127
+    if hasattr(var, 'ncattrs'):          # a netCDF4 Variable: read its data
+        var = var[...]
+    var = np.ma.masked_invalid(np.ma.asarray(var).astype(float))
+    var = np.ma.masked_where(np.isin(np.ma.getdata(var), _PLOT_FILL_VALUES), var)
     ny, nx = var.shape
     fig = plt.figure()
     ax = plt.subplot(111)
@@ -19,14 +31,20 @@ def variable_visualization(var, x, y, var_name, par_id, text_id, path, scale=15,
                       )
     fig.colorbar(ax_sl, extend='max', orientation = 'horizontal')
 
-    plt.title('{}: {}\n'
-              '[{}], '
-              'min: {:.2f}, max: {:.2f}, avg: {:.2f}, stdev: {:.2f}'.format(
-                var_name, par_id, text_id,
-                np.min(var), np.max(var), np.average(var), np.std(var)))
+    n_valid = int(var.count())
+    if n_valid:
+        stats = 'min: {:.2f}, max: {:.2f}, avg: {:.2f}, stdev: {:.2f}, cells: {}'.format(
+            var.min(), var.max(), var.mean(), var.std(), n_valid)
+    else:
+        stats = 'no data (all fill)'
+    plt.title('{}: {}\n[{}], {}'.format(var_name, par_id, text_id, stats))
 
-    fig.savefig(os.path.join(path,'{}_{}.png'.format(var_name, par_id)),
+    # par_id can be a formula (e.g. 'pr.thicknes*0.0242'); characters like
+    # * ? : / are not allowed in Windows file names, so replace them
+    safe_id = re.sub(r'[<>:"/\\|?*\s]', '_', str(par_id))
+    fig.savefig(os.path.join(path,'{}_{}.png'.format(var_name, safe_id)),
                 dpi=400)
+    plt.close(fig)
     debug('{}: {} was successfully plotted', var_name, par_id)
 
 def create_slanted_vtk(db, cfg):

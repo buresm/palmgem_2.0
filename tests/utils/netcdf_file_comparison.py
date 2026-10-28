@@ -4,10 +4,12 @@ import numpy.ma as ma
 from src.logger import warning, debug
 
 
-def compare_netcdf_verbose(file1, file2, tolerance=1e-5, max_verbose_points=10):
+def compare_netcdf_verbose(file1, file2, tolerance=1e-5, max_verbose_points=10, ignore_attrs=()):
     """
     Compares two NetCDF files: dimensions, global attributes, and variable data.
     Returns True if files match within tolerance, False otherwise.
+    ``ignore_attrs`` names global attributes that legitimately differ between
+    runs (creation time, history, ...).
     """
     ds1 = Dataset(file1, 'r')
     ds2 = Dataset(file2, 'r')
@@ -29,7 +31,7 @@ def compare_netcdf_verbose(file1, file2, tolerance=1e-5, max_verbose_points=10):
         # Global attribute check
         attrs1 = {a: getattr(ds1, a) for a in ds1.ncattrs()}
         attrs2 = {a: getattr(ds2, a) for a in ds2.ncattrs()}
-        for attr in set(attrs1) | set(attrs2):
+        for attr in (set(attrs1) | set(attrs2)) - set(ignore_attrs):
             if attrs1.get(attr) != attrs2.get(attr):
                 log_diff(f"global attribute '{attr}': {attrs1.get(attr)!r} vs {attrs2.get(attr)!r}")
 

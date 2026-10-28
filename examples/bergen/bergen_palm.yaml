@@ -15,9 +15,17 @@
 # You should have received a copy of the GNU General Public License along with
 # PALM-GeM. If not, see <https://www.gnu.org/licenses/>.
 
+# static driver stage: build the domain grid from the preprocessed input
+# schema (bergen.yaml) and write output/bergen_static.nc
+run_tasks:
+  - initialize_domain
+  - static_driver
+
 input_schema: 'inputs_bergen'
 srid_input: 32632
 srid_palm: 32632
+srid: 32632
+srid_utm: 32632
 
 domain:
     name: 'bergen'

@@ -81,6 +81,59 @@ def ensure_capability_flags(cfg, db):
             debug('derived capability flag {} = {}', key, value)
 
 
+def build_impervious_correction(cfg, db, has_impervious):
+    """(Re)create the session temp table ``impervious_correction``: grid cells
+    typed 202 (sealed) whose imperviousness raster value is <= 50 % become
+    vegetation type 3. Without an impervious raster the table is empty.
+
+    The static driver joins this table in write_pavements/write_vegetation.
+    It is a temp table, so it exists only in the session that created it.
+    """
+    schema = cfg.domain.case_schema
+    if has_impervious:
+        query = f"""
+            drop table if exists impervious_correction;
+            create temp table impervious_correction as
+            select
+                g.id,
+                3 as new_type
+            from "{schema}"."{cfg.tables.grid}" g
+                join "{schema}"."{cfg.tables.landcover}" l on l.lid = g.lid
+                join lateral (
+                    select st_nearestvalue(rast, g.point) as impervious_value
+                    from "{schema}"."{cfg.tables.impervious}"
+                    where st_intersects(tile_extent, g.point)
+                    limit 1
+                ) r on true
+            where l.type = 202
+                and r.impervious_value <= 50;
+        """
+    else:
+        query = """
+            drop table if exists impervious_correction;
+            create temp table impervious_correction as
+            select
+                -999999 as id,
+                103 as new_type
+            limit 0;
+        """
+    db.execute(query)
+
+
+def ensure_impervious_correction(cfg, db):
+    """Recreate ``impervious_correction`` when a driver runs in a separate
+    process from initialize_domain (staged run): the temp table is gone with
+    the old session, and the static driver's vegetation/pavement queries
+    would fail with UndefinedTable. A same-process run keeps its table."""
+    if db.fetchone("select to_regclass('pg_temp.impervious_correction') is not null"):
+        return
+    has_impervious = _table_exists(db, cfg.domain.case_schema, cfg.tables.impervious)
+    progress('recreating impervious_correction from schema "{}" (staged run; '
+             'impervious raster {})', cfg.domain.case_schema,
+             'present' if has_impervious else 'absent')
+    build_impervious_correction(cfg, db, has_impervious)
+
+
 def ensure_slurb_inputs(cfg, db):
     """Fail fast, before any file is written, when the SLURB input tables are
     unusable.

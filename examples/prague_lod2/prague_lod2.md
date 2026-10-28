@@ -29,6 +29,8 @@ All layers are projected to **EPSG:32633** (UTM zone 33N), DEM included.
   [docs/install.md](../../docs/install.md).
 - GDAL/OGR (`ogr2ogr`), `raster2pgsql` and `psql` on your `PATH`
   (or set full paths at the bottom of the config on Windows).
+- Database credentials: `.env` (`PALM_GEM_DB_*`), if present, overrides the
+  `database:` block of the config.
 - Python dependencies: `pip install -r requirements.txt`.
 
 ## Run it
@@ -39,11 +41,12 @@ All layers are projected to **EPSG:32633** (UTM zone 33N), DEM included.
 2. **Run the pipeline from the repository root:**
 
    ```bash
-   python main.py -c ../examples/prague_lod2/prague_lod2.yaml
+   python main.py -c examples/prague_lod2/prague_lod2.yaml
    ```
 
-   The `-c` path is resolved relative to the `config/` directory, so `../` steps
-   back out to this example. The configured `run_tasks` will:
+   The `-c` path is looked up in `config/` first and then taken as given, so the
+   path from the repository root works (the older `../examples/...` form, relative
+   to `config/`, still works too). The configured `run_tasks` will:
 
    | task | does |
    |------|------|
@@ -52,9 +55,10 @@ All layers are projected to **EPSG:32633** (UTM zone 33N), DEM included.
    | `lad` | grid the trees into leaf-area density |
    | `static_driver` | write the NetCDF static driver |
 
-3. **Output:** `output/prague_lod2_static.nc`. Visual checks (enabled in the
-   config) are written to `visual_check/prague_lod2/`, logs to
-   `logs/prague_lod2/`.
+3. **Output:** `output/prague_lod2_static.nc`, checked against the PALM Input
+   Data Standard right after writing (findings in the log). Visual checks
+   (enabled in the config) are written to `visual_check/prague_lod2/`, the log
+   to `logs/prague_lod2`.
 
 That's it — no manual SQL import or attribute renaming is required; the config
 maps this dataset's legacy column names to the standard names and points
@@ -65,10 +69,9 @@ maps this dataset's legacy column names to the standard names and points
 - **Surface parameters** are loaded automatically from `config/surface_params.csv`.
   The identical `files/surface_params.csv` is kept here only for reference. To
   customise them, set `surface_params_file:` in the config.
-- **Manual import (optional).** [`import_pgsql_prague_lod2.sh`](import_pgsql_prague_lod2.sh)
-  imports the same layers with `ogr2ogr`/`raster2pgsql` directly. It is **not
-  needed** when you run the `gis_import` task above; it is provided only for users
-  who prefer to populate the input schema by hand (edit its connection variables
-  first).
+- **Import.** The `gis_import` task loads all layers from `data_imports` in the
+  config; no manual import script is needed. To re-run only the later stages
+  against the already-imported `inputs_prague_lod2` schema, drop `gis_import`
+  from `run_tasks` (see [staged runs](../../docs/tasks.md)).
 - **Resolution / domain.** 1 m `dx/dy/dz`, `nx=500`, `ny=400`, centred at
   (460198, 5546223). Adjust in the config to crop or move the domain.

@@ -12,51 +12,57 @@ The static driver preparation workflow:
 - **Terrain and buildings** — process EU-DEM elevation and building height rasters onto the PALM grid
 - **Trees** — compute leaf area density (LAD) / leaf area index (LAI) from individual tree data
 - **Cut-cell topography** — optional slanted-face CCT extension for complex terrain
-- **NetCDF output** — write a PALM-compliant static driver (and optional SLURB driver)
+- **NetCDF output** — write a PALM-compliant static driver (and optional SLURB driver for the PALM-SLUrb single-layer urban model)
+- **Quality checks** — every driver is validated against the PALM Input Data Standard plus cross-variable consistency rules; optional HTML QA report and a styled QGIS GeoPackage of the case
 
 ## Installation
 
 See [docs/install.md](docs/install.md) for full setup instructions (PostgreSQL+PostGIS, GDAL tools, Python environment, SQL function loading).
 
-Quick start:
+Quick start, using the self-contained [Prague LOD2 example](examples/prague_lod2/prague_lod2.md) (all its input data ships in the repository):
 
 ```bash
-python -m venv .venv && .venv/Scripts/activate    # Windows
+python -m venv .venv
+source .venv/bin/activate                         # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 cp .env.example .env                              # fill in DB credentials
 docker compose up -d                              # start PostGIS (or use a native install)
-python main.py -c config/user_config_palm.yaml
+python main.py -c examples/prague_lod2/prague_lod2.yaml
 ```
 
 The `docker compose` step runs a PostGIS database in a container (auto-loading the
-required extensions and SQL functions); the import tools still run on the host. To
-install PostgreSQL natively instead, see [docs/install.md](docs/install.md).
+required extensions and SQL functions); the import tools `ogr2ogr`, `raster2pgsql` and
+`psql` still run on the host and must be on your `PATH` or set in the config. To install
+PostgreSQL natively instead, see [docs/install.md](docs/install.md). The `-c` path is
+looked up in `config/` first, then taken as given.
+
+Run the tests with `pip install -r requirements-dev.txt` and `pytest -m "not integration"`
+(no database needed); see [Testing](docs/install.md#testing) for the database-backed tests.
 
 ## Documentation
 
 | Topic | Link |
 |-------|------|
+| Installation, database setup & testing | [docs/install.md](docs/install.md) |
 | Tasks, pipeline & staged (multi-run) execution | [docs/tasks.md](docs/tasks.md) |
 | Configuration reference | [docs/configuration_docs.md](docs/configuration_docs.md) |
 | Running the preprocessor | [docs/run_preprocessor.md](docs/run_preprocessor.md) |
 | Running the static driver generator | [docs/run_palm_static_driver.md](docs/run_palm_static_driver.md) |
+| Importing GIS data into PostGIS | [docs/import2postgresql.md](docs/import2postgresql.md) |
 | General architecture & log levels | [docs/general.md](docs/general.md) |
-| QGIS visualization | [docs/visualization.md](docs/visualization.md) |
+| Checking and visualizing results (QGIS, QA report, PIDS checks) | [docs/visualization.md](docs/visualization.md) |
 | Cut-cell topography | [docs/cut_cell_topo.md](docs/cut_cell_topo.md) |
-| 3D buildings (LOD2) | [docs/buildings_3d.md](docs/buildings_3d.md) |
+| 3D buildings | [docs/buildings_3d.md](docs/buildings_3d.md) |
+| LOD2 surface parameters | [docs/lod2.md](docs/lod2.md) |
+| Trees | [docs/tree.md](docs/tree.md) |
 | Leaf area density | [docs/lad.md](docs/lad.md) |
 | Surface fractions | [docs/surf_frac.md](docs/surf_frac.md) |
 | Impervious surfaces | [docs/impervious.md](docs/impervious.md) |
 
 ## Examples
 
-Working configurations for four European cities:
-
-- [Berlin](examples/berlin/README.md)
-- [Prague](examples/prague/README.md)
-- [Brno](examples/brno/README.md)
-- [Bergen](examples/bergen/README.md)
-- [Prague LOD2](examples/prague_lod2/prague_lod2.md)
+- [Prague LOD2](examples/prague_lod2/prague_lod2.md): self-contained (input data included), runs end to end.
+- City configurations for UrbanAtlas + OSM + EU-DEM inputs (download the data yourself; see each README): [Berlin](examples/berlin/README.md), [Prague](examples/prague/README.md), [Brno](examples/brno/README.md), [Bergen](examples/bergen/README.md).
 
 ## Benchmark
 

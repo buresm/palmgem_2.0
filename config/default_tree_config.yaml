@@ -6,6 +6,8 @@ trees:
     nhv: 10               # number of discretization layers for calculation of tree vertical shapes
     nump: 10              # number of polygon edges for interpolation of cycles for treetops and tree trunks
     ext_coef: 0.6         # Extinction coefficient (same as in PALM code) for tree crown transmissivity
+    constant_lad: False   # Turn on constant LAD module (constant LAD in the whole tree volume)
+    constant_lad_val: 1.6 # Constant LAD in whole tree volume [m2/m3]; BAD = bad_coef * this
 
 canopy:
     using_lai: False

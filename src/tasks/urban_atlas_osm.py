@@ -19,9 +19,14 @@ class UrbanAtlasOSM(BaseTask):
         self.transform_urban_atlas()
         # OSM streetmap merge is opt-in: it needs an imported streetmaps table
         # (tables.streetmaps_or) and is enabled via process_streetmaps in config.
-        if getattr(self.cfg, 'process_streetmaps', False):
+        # The landcover finalisation (column restructuring, primary key and the
+        # UrbanAtlas code -> PALM type mapping) always runs, as in pre-2.0;
+        # 2.0 had tied it to process_streetmaps, so with the default (False)
+        # the landcover kept raw UrbanAtlas codes and got no type column.
+        with_streetmaps = getattr(self.cfg, 'process_streetmaps', False)
+        if with_streetmaps:
             self.transform_streetmaps()
-            self.merge_urban_atlas_streetmaps()
+        self.merge_urban_atlas_streetmaps(include_streetmaps=with_streetmaps)
 
     def create_envelope(self):
         compute_envelope(
@@ -257,52 +262,53 @@ class UrbanAtlasOSM(BaseTask):
             sql_cleanup = f'drop table if exists "{self.cfg.input_schema}"."{self.cfg.tables.streetmaps_or}" cascade'
             self.execute(sql_cleanup)
 
-    def merge_urban_atlas_streetmaps(self):
+    def merge_urban_atlas_streetmaps(self, include_streetmaps=True):
         """ Create final landcover from urban atlas and open streetmaps. """
         progress('finalizing landcover table')
         joined_streetmaps = 'joined_streetmaps'
 
-        # 1. prepare streetmap union
-        debug('preparing streetmap union')
-        # Subdivide the unioned streetmaps into small indexed pieces. Differencing
-        # against one giant geometry is the classic PostGIS bottleneck; many small
-        # pieces let the gist index restrict each difference to nearby geometry.
-        sql_union = f"""
-            drop table if exists "{self.cfg.input_schema}"."{joined_streetmaps}";
-            create table "{self.cfg.input_schema}"."{joined_streetmaps}" as
-            select st_subdivide(st_union(geom), 128) as geom from "{self.cfg.input_schema}"."{self.cfg.tables.streetmaps}"
-        """
-        self.execute(sql_union)
+        if include_streetmaps:
+            # 1. prepare streetmap union
+            debug('preparing streetmap union')
+            # Subdivide the unioned streetmaps into small indexed pieces. Differencing
+            # against one giant geometry is the classic PostGIS bottleneck; many small
+            # pieces let the gist index restrict each difference to nearby geometry.
+            sql_union = f"""
+                drop table if exists "{self.cfg.input_schema}"."{joined_streetmaps}";
+                create table "{self.cfg.input_schema}"."{joined_streetmaps}" as
+                select st_subdivide(st_union(geom), 128) as geom from "{self.cfg.input_schema}"."{self.cfg.tables.streetmaps}"
+            """
+            self.execute(sql_union)
 
-        # 2. update ownership and index
-        self.set_table_owner(self.cfg.input_schema, joined_streetmaps)
+            # 2. update ownership and index
+            self.set_table_owner(self.cfg.input_schema, joined_streetmaps)
 
-        debug('adding geom index')
-        sql_idx = f"""
-            create index if not exists {joined_streetmaps}_geom_idx 
-            on "{self.cfg.input_schema}"."{joined_streetmaps}" 
-            using gist(geom)
-        """
-        self.execute(sql_idx)
+            debug('adding geom index')
+            sql_idx = f"""
+                create index if not exists {joined_streetmaps}_geom_idx 
+                on "{self.cfg.input_schema}"."{joined_streetmaps}" 
+                using gist(geom)
+            """
+            self.execute(sql_idx)
 
-        # 3. subtract streetmaps from landcover. For each landcover polygon we
-        # subtract only the subdivided streetmap pieces that actually intersect it
-        # (gist-accelerated); equivalent to differencing the full union but far
-        # cheaper. `where exists` skips polygons no streetmap touches.
-        progress('creating difference between landcover and unioned streetmaps')
-        sql_diff = f"""
-            update "{self.cfg.input_schema}"."{self.cfg.tables.im_landcover}" as l set
-            geom = st_difference(l.geom, (
-                select st_union(s.geom)
-                from "{self.cfg.input_schema}"."{joined_streetmaps}" s
-                where st_intersects(l.geom, s.geom)
-            ))
-            where exists (
-                select 1 from "{self.cfg.input_schema}"."{joined_streetmaps}" s
-                where st_intersects(l.geom, s.geom)
-            )
-        """
-        self.execute(sql_diff)
+            # 3. subtract streetmaps from landcover. For each landcover polygon we
+            # subtract only the subdivided streetmap pieces that actually intersect it
+            # (gist-accelerated); equivalent to differencing the full union but far
+            # cheaper. `where exists` skips polygons no streetmap touches.
+            progress('creating difference between landcover and unioned streetmaps')
+            sql_diff = f"""
+                update "{self.cfg.input_schema}"."{self.cfg.tables.im_landcover}" as l set
+                geom = st_difference(l.geom, (
+                    select st_union(s.geom)
+                    from "{self.cfg.input_schema}"."{joined_streetmaps}" s
+                    where st_intersects(l.geom, s.geom)
+                ))
+                where exists (
+                    select 1 from "{self.cfg.input_schema}"."{joined_streetmaps}" s
+                    where st_intersects(l.geom, s.geom)
+                )
+            """
+            self.execute(sql_diff)
 
         if self.cfg.landcover_has_types:
             # 4.-6. typed landcover: keep type as-is, merged streetmap polygons
@@ -314,14 +320,15 @@ class UrbanAtlasOSM(BaseTask):
             """
             self.execute(sql_alter)
 
-            debug(f'inserting streetmaps into landcover as building type {self.cfg.default_building_type}')
-            sql_ins = f"""
-                insert into "{self.cfg.input_schema}"."{self.cfg.tables.im_landcover}"
-                (type, osm_id, geom)
-                select {self.cfg.default_building_type}, cast(osm_id as integer), geom
-                from "{self.cfg.input_schema}"."{self.cfg.tables.streetmaps}"
-            """
-            self.execute(sql_ins)
+            if include_streetmaps:
+                debug(f'inserting streetmaps into landcover as building type {self.cfg.default_building_type}')
+                sql_ins = f"""
+                    insert into "{self.cfg.input_schema}"."{self.cfg.tables.im_landcover}"
+                    (type, osm_id, geom)
+                    select {self.cfg.default_building_type}, cast(osm_id as integer), geom
+                    from "{self.cfg.input_schema}"."{self.cfg.tables.streetmaps}"
+                """
+                self.execute(sql_ins)
         else:
             # 4. restructure landcover columns
             verbose('restructuring landcover table columns')
@@ -344,15 +351,16 @@ class UrbanAtlasOSM(BaseTask):
             """
             self.execute(sql_cast)
 
-            # 6. insert streetmaps into landcover
-            debug('inserting streetmaps into landcover')
-            sql_ins = f"""
-                insert into "{self.cfg.input_schema}"."{self.cfg.tables.im_landcover}"
-                (type, osm_id, code, geom)
-                select null, cast(osm_id as integer), code, geom
-                from "{self.cfg.input_schema}"."{self.cfg.tables.streetmaps}"
-            """
-            self.execute(sql_ins)
+            if include_streetmaps:
+                # 6. insert streetmaps into landcover
+                debug('inserting streetmaps into landcover')
+                sql_ins = f"""
+                    insert into "{self.cfg.input_schema}"."{self.cfg.tables.im_landcover}"
+                    (type, osm_id, code, geom)
+                    select null, cast(osm_id as integer), code, geom
+                    from "{self.cfg.input_schema}"."{self.cfg.tables.streetmaps}"
+                """
+                self.execute(sql_ins)
 
         # 7. handle primary key and cleanup
         debug('finalizing table keys')

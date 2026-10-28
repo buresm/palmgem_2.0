@@ -15,9 +15,17 @@
 # You should have received a copy of the GNU General Public License along with
 # PALM-GeM. If not, see <https://www.gnu.org/licenses/>.
 
+# static driver stage: build the domain grid from the preprocessed input
+# schema (brno.yaml) and write output/brno_static.nc
+run_tasks:
+  - initialize_domain
+  - static_driver
+
 input_schema: 'inputs_brno'
 srid_input: 32633
 srid_palm: 32633
+srid: 32633
+srid_utm: 32633
 
 domain:
     name: 'brno'

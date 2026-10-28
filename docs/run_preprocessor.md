@@ -38,4 +38,4 @@ Add the relevant preprocessing tasks to `run_tasks` in your config (e.g. `gis_im
 python main.py -c your_config.yaml
 ```
 
-The config path is relative to the `config/` directory. Logs are written to `logs/<name><scenario>.log`. Processed tables can be inspected in QGIS — see [visualization](visualization.md).
+The config file is looked up in `config/` first, then taken as given (relative to the current directory or absolute). The preprocessing tasks write into `input_schema`; set `process_streetmaps: True` to merge the OSM building footprints into the UrbanAtlas landcover (off by default), and `landcover_has_types: True` when your landcover already carries PALM types instead of UrbanAtlas codes (see [configuration](configuration_docs.md#preprocessor-tool)). The log of the last run is `logs/<case_schema>`. Processed tables can be inspected in QGIS — see [visualization](visualization.md). [tasks.md](tasks.md) shows which tasks read and write what, and how to split import, preprocessing and driver generation across separate runs.

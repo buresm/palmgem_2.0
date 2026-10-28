@@ -15,9 +15,21 @@
 # You should have received a copy of the GNU General Public License along with
 # PALM-GeM. If not, see <https://www.gnu.org/licenses/>.
 
+# preprocessing stage (run after import_pgsql_berlin.sh has filled the input
+# schema): merge UrbanAtlas + OSM footprints into the landcover and process the
+# DEM / building-height rasters. The results stay in the input schema, which
+# berlin_palm.yaml then builds the PALM domain from.
+run_tasks:
+  - urban_atlas_osm
+  - urban_atlas_dem_buildings
+
+input_schema: 'inputs_berlin'
+process_streetmaps: True   # merge the OSM building footprints (off by default)
+
 srid_input: 32633
 srid_palm: 32633
 srid: 32633
+srid_utm: 32633
 
 domain:
     name: 'inputs_berlin'

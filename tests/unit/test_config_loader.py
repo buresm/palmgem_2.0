@@ -135,3 +135,33 @@ class TestLoadConfig:
         assert (tmp_path / 'output').is_dir()
         assert (tmp_path / 'logs').is_dir()
         assert (tmp_path / 'visual_check').is_dir()
+
+
+class TestUserConfigPath:
+    """-c accepts a name inside config/ (documented form) and, failing that,
+    a path as given: relative to the current directory or absolute."""
+
+    USER_YAML = "domain:\n    name: 'pathcheck'\n    scenario: ''\n"
+
+    def test_name_inside_config_folder(self, tmp_path):
+        (tmp_path / 'case.yaml').write_text(self.USER_YAML)
+        cfg = load_config('case.yaml', config_folder=str(tmp_path))
+        assert cfg.domain.name == 'pathcheck'
+
+    def test_path_relative_to_cwd(self, tmp_path, monkeypatch):
+        (tmp_path / 'sub').mkdir()
+        (tmp_path / 'sub' / 'case.yaml').write_text(self.USER_YAML)
+        monkeypatch.chdir(tmp_path)
+        cfg = load_config('sub/case.yaml')
+        assert cfg.domain.name == 'pathcheck'
+
+    def test_absolute_path(self, tmp_path):
+        user_cfg = tmp_path / 'case.yaml'
+        user_cfg.write_text(self.USER_YAML)
+        cfg = load_config(str(user_cfg))
+        assert cfg.domain.name == 'pathcheck'
+
+    def test_missing_config_still_raises(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        with pytest.raises(FileNotFoundError):
+            load_config('does_not_exist.yaml')

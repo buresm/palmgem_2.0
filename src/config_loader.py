@@ -168,7 +168,7 @@ def load_config(config_path='', config_folder='config'):
 
     # 2. Load User Config (from CLI)
     if not config_path == '':
-        user_cfg = cfg_user_dir / config_path
+        user_cfg = _resolve_user_config(config_path, cfg_user_dir)
         if user_cfg.exists():
             with open(user_cfg, 'r') as f:
                 user_dict = yaml.load(f, Loader=yaml.FullLoader) or {}
@@ -190,8 +190,9 @@ def load_config(config_path='', config_folder='config'):
             # A config was explicitly requested but not found. Fail loudly rather
             # than silently running on defaults (wrong domain/database/tasks).
             raise FileNotFoundError(
-                f"Config file not found: {user_cfg}. The path passed to -c is "
-                f"resolved relative to the '{config_folder}' directory."
+                f"Config file not found: {config_path}. The path passed to -c is "
+                f"looked up in the '{config_folder}' directory first, then taken "
+                f"as given (absolute, or relative to the current directory)."
             )
 
     # 3. OVERRIDE with Env Vars (for Docker / CI)
@@ -215,6 +216,24 @@ def load_config(config_path='', config_folder='config'):
     _finalize_config(config)
 
     return config
+
+
+def _resolve_user_config(config_path, cfg_user_dir):
+    """Locate the user config passed to -c.
+
+    The config folder is searched first (the documented behaviour:
+    ``-c user_config_palm.yaml``); when nothing is there, the path is taken as
+    given, so ``-c config/user_config_palm.yaml`` from the repo root or an
+    absolute path also work. Returns the folder candidate when neither exists,
+    so the caller reports a not-found error.
+    """
+    in_folder = cfg_user_dir / config_path
+    if in_folder.exists():
+        return in_folder
+    as_given = Path(config_path)
+    if as_given.exists():
+        return as_given
+    return in_folder
 
 
 def _finalize_config(cfg):
