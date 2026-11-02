@@ -12,6 +12,7 @@ from .share_utils import variable_visualization, create_slanted_vtk
 from src.utils.capabilities import (ensure_capability_flags, ensure_domain_geometry,
                                     ensure_slurb_inputs, ensure_impervious_correction)
 from src.utils.pids import run_pids_check
+from .cct_processing import CctProcessing
 from src.utils.slurb_window import (window_cells, box_mean, box_sum,
                                     weighted_box_mean, dominant_type)
 
@@ -75,11 +76,10 @@ class StaticDriverGen(BaseTask):
             self.write_water_pars()
             self.write_vegatation_pars()
 
-        if self.cfg.has_trees:
-            self.write_trees_grid()
-
-        if self.cfg.canopy.using_lai:
-            self.write_lad_grid()
+        # trees and the LAI raster feed one lad/bad field (write_trees_grid and
+        # write_lad_grid each created the variables and could not run together)
+        if self.cfg.has_trees or self.cfg.canopy.using_lai:
+            self.write_canopy()
 
         if not self.cfg.lod2 and self.cfg.prepare_albedo_type:
             self.write_albedo_pars_config()
@@ -1196,6 +1196,88 @@ class StaticDriverGen(BaseTask):
                     show_plots=self.cfg.visual_check.show_plots
                 )
 
+        return True
+
+    LAD_MAX = 1.6   # m2/m3, upper limit of the combined leaf area density
+
+    def write_canopy(self):
+        """
+        writes lad and bad from the gridded trees (lad task) and from the LAI
+        and canopy height raster (lai task) into one field: both sources are
+        summed level by level and lad is limited to LAD_MAX. Level 0 (the
+        surface) stays 0 as PALM requires.
+        """
+        schema, ny, nx, dz = self.cfg.domain.case_schema, self.cfg.domain.ny, self.cfg.domain.nx, self.cfg.domain.dz
+
+        nzlad_tree = 0
+        if self.cfg.has_trees:
+            h = self.fetchone(f'select max(treeh) from "{schema}"."{self.cfg.tables.trees}"')
+            if h:
+                nzlad_tree = ceil(h / dz) + 1
+
+        nzlad_lai = 0
+        if self.cfg.canopy.using_lai:
+            # canopy_height exists only when the lai task ran with its rasters
+            has_column = self.fetchone(
+                "select exists(select 1 from information_schema.columns "
+                "where table_schema = %s and table_name = %s and column_name = 'canopy_height')",
+                (schema, self.cfg.tables.grid))
+            h = self.fetchone(f'select max(canopy_height) from "{schema}"."{self.cfg.tables.grid}"') \
+                if has_column else None
+            if h:
+                nzlad_lai = ceil(h / dz) + 1
+
+        nzlad = max(nzlad_tree, nzlad_lai)
+        if not nzlad:
+            debug('no tree or canopy height in the domain; lad/bad not written')
+            return True
+        debug('nzlad = {} (trees {}, lai {})', nzlad, nzlad_tree, nzlad_lai)
+
+        vt = 'f4'
+        lad = np.zeros((nzlad, ny, nx), dtype=vt)   # index l = netcdf level l + 1
+        bad = np.zeros((nzlad, ny, nx), dtype=vt)
+
+        if nzlad_tree:
+            progress('writing lad, bad from trees')
+            cols = ', '.join(f'lad_{l}, bad_{l}' for l in range(nzlad_tree))
+            for row in self.execute(f'select i, j, {cols} from "{schema}"."{self.cfg.tables.trees_grid}"'):
+                i, j = row[0], row[1]
+                for l in range(nzlad_tree):
+                    lad[l, j, i] += row[2 * l + 2] or 0.0
+                    bad[l, j, i] += row[2 * l + 3] or 0.0
+
+        if nzlad_lai:
+            progress('writing lad, bad from LAI')
+            for l in range(nzlad_lai):
+                z_lower, z_center = l * dz, (l + 0.5) * dz
+                res = self.execute(f"""
+                    select case when {z_center} between 0.0 and g.canopy_height and g.canopy_height > 0
+                                then least({self.LAD_MAX}, coalesce(lai / canopy_height, 0.0))
+                                     * greatest(0.0, least((canopy_height - {z_lower}) / {dz}, 1.0))
+                           else 0.0 end
+                    from "{schema}"."{self.cfg.tables.grid}" g
+                    order by g.j, g.i
+                """)
+                layer = np.reshape(np.asarray([x[0] for x in res], dtype=vt), (ny, nx))
+                lad[l] += layer
+                bad[l] += 0.1 * layer            # branch area density: 10 % of lad
+
+        np.minimum(lad, self.LAD_MAX, out=lad)
+
+        self.prepared_lad_netcdf(nzlad)
+        self.ncfile.variables['lad'][0, :, :] = 0.0
+        self.ncfile.variables['bad'][0, :, :] = 0.0
+        self.ncfile.variables['lad'][1:, :, :] = lad
+        self.ncfile.variables['bad'][1:, :, :] = bad
+
+        if self.cfg.visual_check.enabled:
+            for k in range(nzlad + 1):
+                for vn, text in (('lad', 'leaf_area_density'), ('bad', 'trunk_area_density')):
+                    variable_visualization(var=self.ncfile[vn][k, ...],
+                                           x=np.asarray(self.ncfile.variables['x']),
+                                           y=np.asarray(self.ncfile.variables['y']),
+                                           var_name=vn, par_id=k, text_id=text, path=self.cfg.visual_check.path,
+                                           show_plots=self.cfg.visual_check.show_plots)
         return True
 
     def write_albedo_pars_config(self):
@@ -2324,6 +2406,15 @@ class SlurbDriverGen(StaticDriverGen):
             self._apply_slurb_window(window_n)
             self.execute(sql_cleanup)
 
+        # safety net: PIDS_SLURB does not allow building_plan_area_fraction to
+        # exceed urban_fraction
+        n_fixed = self.fetchone(
+            f'with u as (update "{schema}"."{self.cfg.tables.grid_slurb}" '
+            f'set building_plan_area_fraction = urban_fraction - 0.001 '
+            f'where building_plan_area_fraction > urban_fraction returning 1) select count(*) from u')
+        if n_fixed:
+            debug('slurb: building plan fraction lowered below urban_fraction in {} cell(s)', n_fixed)
+
         n_capped = self.fetchone(
             f'select count(*) from "{schema}"."{self.cfg.tables.grid_slurb}" '
             f'where building_frontal_area_fraction >= 0.99')
@@ -2573,22 +2664,44 @@ class SlurbDriverGen(StaticDriverGen):
     def check_consitency_slurb(self):
         """ """
 
-class CCTDriverGen(StaticDriverGen):
-    """ task for generating the palm cut cell (slant) static driver netcdf file. """
+class CCTDriverGen(CctProcessing, StaticDriverGen):
+    """ task for generating the palm cut cell (slant) static driver netcdf file.
+
+    The cut-cell surfaces are written into the static driver itself, after the
+    usual variables, so run this task instead of static_driver. The geometry
+    comes from the cct_processing task when it ran on the current case schema;
+    otherwise it is built here. """
 
     def run(self):
         """ """
-
-
+        if not self.cfg.do_cct:
+            warning('cct_driver: do_cct is False, nothing to do (use static_driver)')
+            return
+        StaticDriverGen.run(self)
 
     def fill_file(self):
         """ """
+        self.prepare_cct_flags()
+        # the cut surface first: the stair-step variables written by the
+        # static driver (zt, buildings_2d, building/surface types) are aligned
+        # with it before they are written
+        if self.cct_geometry_complete():
+            progress('using the cut-cell geometry from the cct_processing task')
+        else:
+            CctProcessing.slanted_surface_init(self)
+        self.align_stairstep_with_cct()
+        StaticDriverGen.fill_file(self)
+        self.slanted_write_nc()
 
     def finish_file(self):
         """ """
         self.check_cct_consistency(self.ncfile)
         self.cct_continuity_check(self.ncfile)
-        self.ncfile.close()
+        StaticDriverGen.finish_file(self)
+        if self.cfg.visual_check.enabled:
+            from src.utils.cct_viewer import write_viewer
+            out = Path(self.cfg.visual_check.path) / f'{self.cfg.domain.case_schema}_cct_view.html'
+            progress('CCT 3-D view: {}', write_viewer(self.cfg.domain.static_driver_file, out))
 
     def slanted_surface_init(self):
         """ initialize slanted surfaces utilizing task class properties """
@@ -2964,8 +3077,13 @@ class CCTDriverGen(StaticDriverGen):
         num_vert = self.execute(sql_count_vert)[0][0]
 
         self.nc_create_dimension('cct_num_vert', num_vert)
+        # LOD 2 here marks the slanted-surface geometry level (as pre-2.0 wrote
+        # it, next to empty_vert for the slanted-surface reader), not the LOD2
+        # walls/roofs material parametrisation, which is off with do_cct
         self.ncfile.setncattr('LOD', 2)
         self.ncfile.setncattr('empty_vert', empty_vert)
+        # vertical spacing of the cut-cell grid (vertex k indices count dz)
+        self.ncfile.setncattr('cct_dz', float(self.cfg.domain.dz))
 
         # 2. build vertices: coordinates [z, y, x]
         vn = 'cct_vertices'
@@ -3033,106 +3151,118 @@ class CCTDriverGen(StaticDriverGen):
         self.nc_write_attribute('cct_surface_type_classification', 'long_name',
                                 'index for separating lsm=0, usm wall=1, usm roof=2 surfaces')
 
-        # 6. fetch base face data
-        sql_f_base = f"""
-            select vert1i, vert2i, vert3i, vert4i, vert5i, vert6i, vert7i, n_vert, 
-                   case when isterr then 0 when iswall then 1 else 2 end  
-            from "{schema}"."{self.cfg.tables.slanted_faces}" order by k, j, i
-        """
-        res_f = self.execute(sql_f_base)
-        for i in range(7):
-            faces[i, :] = [empty_vert if x[i] is None else x[i] for x in res_f]
-        num_edges[:] = [x[7] for x in res_f]
-        types[:] = [x[8] for x in res_f]
-
-        # 7. fetch type classifications (veg, pav, wat)
-        type_configs = [
-            ('cct_vegetation_type_classification', self.cfg.type_range.vegetation_min,
-             self.cfg.type_range.vegetation_max, 'vegetation'),
-            ('cct_pavement_type_classification', self.cfg.type_range.pavement_min, self.cfg.type_range.pavement_max,
-             'pavement'),
-            ('cct_water_type_classification', self.cfg.type_range.water_min, self.cfg.type_range.water_max, 'water')
-        ]
-
-        for vn, t_min, t_max, long_part in type_configs:
-            v_type = self.ncfile.createVariable(vn, 'i4', ('cct_num_faces',), fill_value=self.cfg.fill_values.i4)
-            self.nc_write_attribute(vn, 'long_name', f'palm pids {long_part} type')
-            sql_t = f"""
-                select l.type - {t_min} from "{schema}"."{self.cfg.tables.slanted_faces}" as s 
-                left outer join "{schema}"."{self.cfg.tables.landcover}" as l on l.lid = s.lid and l.type between {t_min} and {t_max}
-                order by k, j, i
-            """
-            res_t = self.execute(sql_t)
-            v_type[:] = [self.cfg.fill_values.i4 if x[0] is None else x[0] for x in res_t]
-
-        # 8. fetch building types and ids
-        if self.cfg.has_buildings:
-            build_configs = [
-                ('cct_building_type_classification', 'palm pids buildings type', 'lw.type - {6}'),
-                ('cct_building_id_classification', 'palm pids buildings id', 'lw.lid')
-            ]
-            for vn, long_name, col_logic in build_configs:
-                v_build = self.ncfile.createVariable(vn, 'i4', ('cct_num_faces',), fill_value=self.cfg.fill_values.i4)
-                self.nc_write_attribute(vn, 'long_name', long_name)
-
-                sql_b = f"""
-                    select case when iswall then {col_logic.format(None, None, None, None, None, None, self.cfg.type_range.building_min)}
-                                when isroof then {col_logic.replace('lw', 'lr').format(None, None, None, None, None, None, self.cfg.type_range.building_min)}
-                                else null end
-                    from "{schema}"."{self.cfg.tables.slanted_faces}" as s 
-                    left outer join "{schema}"."{self.cfg.tables.walls}" as w on w.wid = s.wid 
-                    left outer join "{schema}"."{self.cfg.tables.landcover}" as lw on lw.lid = w.lid and lw.type between {self.cfg.type_range.building_min} and {self.cfg.type_range.building_max}
-                    left outer join "{schema}"."{self.cfg.tables.roofs}" as r on r.rid = s.rid 
-                    left outer join "{schema}"."{self.cfg.tables.landcover}" as lr on lr.lid = r.lid and lr.type between {self.cfg.type_range.building_min} and {self.cfg.type_range.building_max}
-                    order by k, j, i
-                """
-                res_b = self.execute(sql_b)
-                v_build[:] = [self.cfg.fill_values.i4 if x[0] is None else x[0] for x in res_b]
-
-        # 9. fetch centers, normals, and area
-        sql_geom = f'select st_x(center), st_y(center), st_z(center), normz, normy, normx, area from "{schema}"."{self.cfg.tables.slanted_faces}" order by k, j, i'
-        res_g = self.execute(sql_geom)
-        centers[2, :] = [x[0] - origin_x for x in res_g]
-        centers[1, :] = [x[1] - origin_y for x in res_g]
-        centers[0, :] = [x[2] for x in res_g]
-
-        for i in range(3):
-            normals[i, :] = [x[i + 3] for x in res_g]  # normz, normy, normx
-        area_var[:] = [x[6] for x in res_g]
-
-        # 10. kji locations and offsets (nearest neighbor search)
-        debug('Calculating face locations and building/terrain offsets')
+        # 6.-10. all per-face values in one query. Every variable must list the
+        # faces in the same order, so they are read together, ordered by
+        # k, j, i and the unique id (k, j, i alone has ties when a cell holds
+        # more than one face), and every lookup is a left join so a face
+        # without a match keeps its slot instead of shifting the arrays.
+        #  - terrain faces: landcover type of the face, offset to the nearest
+        #    grid column of a similar landcover type
+        #    (the cell containing the face centre first, then the nearest)
+        #  - wall/roof faces: the nearest building grid cell gives the offset,
+        #    the building type and the building id (the same lid as the
+        #    building_id variable of the static driver)
+        debug('fetching face classification, geometry and offsets')
+        tr = self.cfg.type_range
         off_dist = self.cfg.slanted_pars.off_dist * self.cfg.domain.dx
-
         if self.cfg.has_buildings:
-            sql_off = f"""
-                select js.koff, js.joff, js.ioff, js.k, js.j, js.i from (
-                    select gg.nz as koff, gg.j as joff, gg.i as ioff, s.k, s.j, s.i from "{schema}"."{self.cfg.tables.slanted_faces}" as s 
-                    join lateral (select i, j, nz from "{schema}"."{self.cfg.tables.grid}" as g join "{schema}"."{self.cfg.tables.landcover}" l on l.lid = g.lid 
-                                  where abs(l.type - (select type from "{schema}"."{self.cfg.tables.landcover}" where lid = s.lid)) < 50 
-                                  and st_dwithin(s.center, g.geom, {off_dist}) order by st_distance(g.geom, s.center) limit 1) as gg on true where isterr
-                    union all
-                    select bb.k as koff, bb.j as joff, bb.i as ioff, s.k, s.j, s.i from "{schema}"."{self.cfg.tables.slanted_faces}" as s 
-                    join lateral (select i, j, k from "{schema}"."{self.cfg.tables.buildings_grid}" as b where st_dwithin(s.center, b.geom, {off_dist}) order by st_distance(s.center, b.geom) limit 1) as bb on true where iswall
-                    union all
-                    select bb.k as koff, bb.j as joff, bb.i as ioff, s.k, s.j, s.i from "{schema}"."{self.cfg.tables.slanted_faces}" as s 
-                    join lateral (select i, j, k from "{schema}"."{self.cfg.tables.buildings_grid}" as b where st_dwithin(s.center, b.geom, {off_dist}) order by st_distance(b.geom, s.geom) limit 1) as bb on true where isroof
-                ) as js order by k, j, i
-            """
+            bld_join = f"""
+                left join lateral (select b.i, b.j, b.type, b.lid from "{schema}"."{self.cfg.tables.buildings_grid}" as b
+                                   where (s.iswall or s.isroof) and b.lid is not null
+                                     and st_dwithin(s.center, b.geom, {off_dist})
+                                   order by st_intersects(s.center, b.geom) desc, b.geom <-> s.center
+                                   limit 1) as gb on true"""
+            bld_cols = 'gb.i, gb.j, gb.type, gb.lid'
         else:
-            sql_off = f"""
-                select gg.nz as koff, gg.j as joff, gg.i as ioff, s.k, s.j, s.i from "{schema}"."{self.cfg.tables.slanted_faces}" as s 
-                join lateral (select i, j, nz from "{schema}"."{self.cfg.tables.grid}" as g where s.lid = g.lid and st_dwithin(g.geom, s.center, {off_dist}) 
-                              order by st_distance(g.geom, s.center) limit 1) as gg on true where isterr order by k, j, i
-            """
+            bld_join = ''
+            bld_cols = 'null::integer, null::integer, null::double precision, null::integer'
+        sql_faces = f"""
+            select s.vert1i, s.vert2i, s.vert3i, s.vert4i, s.vert5i, s.vert6i, s.vert7i, s.n_vert,
+                   case when s.isterr then 0 when s.iswall then 1 else 2 end,
+                   lt.type,
+                   st_x(s.center), st_y(s.center), st_z(s.center), s.normz, s.normy, s.normx, s.area,
+                   s.k, s.j, s.i,
+                   gt.nz, gt.j, gt.i,
+                   {bld_cols}
+            from "{schema}"."{self.cfg.tables.slanted_faces}" as s
+            left join "{schema}"."{self.cfg.tables.landcover}" as lt on lt.lid = s.lid
+            left join lateral (select g.i, g.j, g.nz from "{schema}"."{self.cfg.tables.grid}" as g
+                               join "{schema}"."{self.cfg.tables.landcover}" as l on l.lid = g.lid
+                               where s.isterr and abs(l.type - lt.type) < 50
+                                 and st_dwithin(s.center, g.geom, {off_dist})
+                               order by st_intersects(s.center, g.geom) desc, g.geom <-> s.center
+                               limit 1) as gt on true
+            {bld_join}
+            order by s.k, s.j, s.i, s.id
+        """
+        rows = self.execute(sql_faces)
+        fill_i4 = self.cfg.fill_values.i4
 
-        res_o = self.execute(sql_off)
-        kji_locs[0, :] = [x[3] for x in res_o]
-        kji_locs[1, :] = [x[4] for x in res_o]
-        kji_locs[2, :] = [x[5] for x in res_o]
-        offs[0, :] = [x[0] - x[3] for x in res_o]
-        offs[1, :] = [x[1] - x[4] for x in res_o]
-        offs[2, :] = [x[2] - x[5] for x in res_o]
+        for i in range(7):
+            faces[i, :] = [empty_vert if x[i] is None else x[i] for x in rows]
+        num_edges[:] = [x[7] for x in rows]
+        types[:] = [x[8] for x in rows]
+
+        # PIDS type classifications of terrain faces (vegetation, pavement, water)
+        type_configs = [
+            ('cct_vegetation_type_classification', tr.vegetation_min, tr.vegetation_max, 'vegetation'),
+            ('cct_pavement_type_classification', tr.pavement_min, tr.pavement_max, 'pavement'),
+            ('cct_water_type_classification', tr.water_min, tr.water_max, 'water')
+        ]
+        for vn, t_min, t_max, long_part in type_configs:
+            v_type = self.ncfile.createVariable(vn, 'i4', ('cct_num_faces',), fill_value=fill_i4)
+            self.nc_write_attribute(vn, 'long_name', f'palm pids {long_part} type')
+            v_type[:] = [int(x[9]) - t_min if x[8] == 0 and x[9] is not None and t_min <= x[9] <= t_max
+                         else fill_i4 for x in rows]
+
+        # building type and id of wall/roof faces
+        if self.cfg.has_buildings:
+            v_bt = self.ncfile.createVariable('cct_building_type_classification', 'i4', ('cct_num_faces',),
+                                              fill_value=fill_i4)
+            self.nc_write_attribute('cct_building_type_classification', 'long_name', 'palm pids buildings type')
+            v_bt[:] = [int(x[25]) - tr.building_min if x[8] != 0 and x[25] is not None else fill_i4 for x in rows]
+            v_bi = self.ncfile.createVariable('cct_building_id_classification', 'i4', ('cct_num_faces',),
+                                              fill_value=fill_i4)
+            self.nc_write_attribute('cct_building_id_classification', 'long_name', 'palm pids buildings id')
+            v_bi[:] = [int(x[26]) if x[8] != 0 and x[26] is not None else fill_i4 for x in rows]
+
+        # centres (relative to the domain origin), normals and areas
+        centers[2, :] = [x[10] - origin_x for x in rows]
+        centers[1, :] = [x[11] - origin_y for x in rows]
+        centers[0, :] = [x[12] for x in rows]
+        for i in range(3):
+            normals[i, :] = [x[13 + i] for x in rows]  # normz, normy, normx
+        area_var[:] = [x[16] for x in rows]
+
+        # kji location of each face and the offset to the grid column (terrain)
+        # or building cell (walls, roofs) whose properties it takes; a face
+        # without a match within off_dist keeps offset 0
+        kji_locs[0, :] = [x[17] for x in rows]
+        kji_locs[1, :] = [x[18] for x in rows]
+        kji_locs[2, :] = [x[19] for x in rows]
+        missing = 0
+        off_k, off_j, off_i = [], [], []
+        for x in rows:
+            if x[8] == 0:
+                ko, jo, io = x[20], x[21], x[22]
+            else:
+                ko, jo, io = x[17], x[23], x[24]   # building cells have no k: no vertical offset
+            if jo is None:
+                missing += 1
+                ko, jo, io = x[17], x[18], x[19]
+            off_k.append(ko - x[17])
+            off_j.append(jo - x[18])
+            off_i.append(io - x[19])
+        offs[0, :], offs[1, :], offs[2, :] = off_k, off_j, off_i
+        if missing:
+            warning('cct: {} face(s) found no grid or building cell within {} m; offset set to 0',
+                    missing, off_dist)
+
+        for vn, units in (('cct_vertices', 'm'), ('cct_vertex_coords', '1'), ('cct_vertex_shifts', '1'),
+                          ('cct_vertices_per_face', '1'), ('cct_face_center', 'm'), ('cct_3d_grid_indices', '1'),
+                          ('cct_offsets', '1'), ('cct_face_normal_vector', '1'), ('cct_face_area', 'm2'),
+                          ('cct_num_vertices_per_face', '1'), ('cct_surface_type_classification', '1')):
+            self.nc_write_attribute(vn, 'units', units)
 
         return True
 
@@ -3271,7 +3401,7 @@ class CCTDriverGen(StaticDriverGen):
 
         debug('create table of individual vertices 2, based on kjidir index')
         sqltext = f'create table "{schema}"."{table_v}" as ' \
-                  'select row_number() over () as id, k, j, i, dir, len, point ' \
+                  'select row_number() over () as id, k, j, i, dir, len, (array_agg(point))[1] as point ' \
                   'from (' \
                   f'      select kk1 as k, jj1 as j, ii1 as i, dir1 as dir, len1 as len, vert1 as point from "{schema}"."{table_f}" as v2_1 where ii1 is not null ' \
                   '      union all ' \
@@ -3287,7 +3417,7 @@ class CCTDriverGen(StaticDriverGen):
                   '      union all ' \
                   f'      select kk7 as k, jj7 as j, ii7 as i, dir7 as dir, len7 as len, vert7 as point from "{schema}"."{table_f}" as v2_7 where ii7 is not null ' \
                   '      ) as s ' \
-                  'group by k,j,i,dir,len,point'
+                  'group by k,j,i,dir,len'   # one vertex per integer description (the key the faces join on)
         self.execute(sqltext)
 
         verbose('\tadding kjidir index')
@@ -3303,11 +3433,14 @@ class CCTDriverGen(StaticDriverGen):
         sqltext = f'create index if not exists index_id on "{schema}"."{table_v}" (id)'
         self.execute(sqltext)
 
+        # the shift is part of the key: an edge can be cut twice from the same
+        # corner (two points on one grid edge, seen on coarse grids); joining on
+        # corner and direction alone linked such faces to an arbitrary one of them
         for i in range(1, 8):
             debug(f'joining vertices n. {i}')
             sqltext = f'update "{schema}"."{table_f}" set ' \
                       f'vert{i}i = v.id from "{schema}"."{table_v}" as v ' \
-                      f'where ii{i} = v.i and jj{i} = v.j and kk{i} = v.k and dir{i} = v.dir'
+                      f'where ii{i} = v.i and jj{i} = v.j and kk{i} = v.k and dir{i} = v.dir and len{i} = v.len'
             self.execute(sqltext)
             debug(f'end joining vertices n. {i}')
 

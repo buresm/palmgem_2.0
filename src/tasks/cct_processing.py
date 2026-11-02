@@ -30,6 +30,7 @@ from pyproj import CRS, Transformer
 from scipy.linalg import lstsq, norm
 from src.logger import progress, debug, verbose, warning, error, sql_debug, extra_verbose
 from .base import BaseTask
+from .share_utils import create_slanted_vtk
 
 
 class CctProcessing(BaseTask):
@@ -48,9 +49,204 @@ class CctProcessing(BaseTask):
         from src.utils.capabilities import ensure_capability_flags, ensure_domain_geometry
         ensure_capability_flags(self.cfg, self.db)
         ensure_domain_geometry(self.cfg, self.db)
+        self.prepare_cct_flags()
 
         progress('Run CCT Module')
         self.slanted_surface_init()
+        self.align_stairstep_with_cct()
+
+    def _face_center_sql(self):
+        """ SQL for a face centre (needs one %s parameter, the srid).
+        x/y: the polygon centroid, unless the footprint is a sliver (area below
+        a quarter of its bounding box), as for a nearly vertical wall: the 2-D
+        centroid of such a sliver is numerically unstable and can land far
+        outside the face, so the mean of its vertices is used there. z: the
+        mean of its vertices (the closing point of the ring counted once). """
+        # the closing point of the ring is removed inside the function argument,
+        # where geom still is the face (inside the subquery p.geom shadows it)
+        pts = ('from st_dumppoints(st_removepoint(st_exteriorring(geom), '
+               'st_npoints(st_exteriorring(geom)) - 1)) as p')
+        xy_ok = ('st_area(geom) > 0 and st_area(geom) >= 0.25 * (st_xmax(geom) - st_xmin(geom)) '
+                 '* (st_ymax(geom) - st_ymin(geom))')
+        return (f'st_setsrid(st_makepoint('
+                f'case when {xy_ok} then st_x(st_centroid(geom)) else (select avg(st_x(p.geom)) {pts}) end, '
+                f'case when {xy_ok} then st_y(st_centroid(geom)) else (select avg(st_y(p.geom)) {pts}) end, '
+                f'(select avg(st_z(p.geom)) {pts})), %s)')
+
+    def unify_edge_vertices(self):
+        """ Give every vertex that lies inside a grid edge one integer
+        description. Such a point can be described from either end corner of
+        the edge (corner + len along dir, or the other corner + 1 - len the
+        other way), and neighbouring faces sometimes pick different ends; the
+        vertex table then holds the point twice and the surface is not
+        connected there. The format describes a vertex from its solid corner,
+        with dir pointing into air, i.e. to the side the face normals point to,
+        so the description agreeing with the area-weighted normal of all faces
+        sharing the point is kept. """
+        schema, table = self.cfg.domain.case_schema, self.cfg.tables.slanted_faces
+        cols = ', '.join(f'st_x(vert{n}), st_y(vert{n}), st_z(vert{n}), kk{n}, jj{n}, ii{n}, dir{n}, len{n}'
+                         for n in range(1, 8))
+        rows = self.execute(f'select id, normz, normy, normx, area, {cols} from "{schema}"."{table}"')
+        tol = 1e-6 * min(self.cfg.domain.dx, self.cfg.domain.dy, self.cfg.domain.dz)
+        groups = {}
+        for r in rows:
+            fid, nrm, area = r[0], np.array(r[1:4], dtype=float), r[4] or 0.0
+            for n in range(7):
+                x, y, z, k, j, i, d, ln = r[5 + 8 * n: 13 + 8 * n]
+                if i is None or x is None or ln is None or ln < 1e-9 or ln > 1 - 1e-9:
+                    continue
+                key = (round(x / tol), round(y / tol), round(z / tol))
+                g = groups.setdefault(key, {'normal': np.zeros(3), 'uses': []})
+                g['normal'] += np.nan_to_num(nrm) * area
+                g['uses'].append((fid, n + 1, (k, j, i, d, ln)))
+        axis, sign = {0: 0, 1: 0, 2: 1, 3: 1, 4: 2, 5: 2}, {0: 1, 1: -1, 2: 1, 3: -1, 4: 1, 5: -1}
+        updates = []
+        for g in groups.values():
+            descs = {u[2][:4]: u[2] for u in g['uses']}
+            if len(descs) < 2:
+                continue
+            best = max(descs.values(), key=lambda dsc: sign[dsc[3]] * g['normal'][axis[dsc[3]]])
+            for fid, n, dsc in g['uses']:
+                if dsc[:4] != best[:4]:
+                    updates.append((n, best, fid))
+        if not updates:
+            return
+        for n in range(1, 8):
+            batch = [(b[0], b[1], b[2], b[3], b[4], fid) for m, b, fid in updates if m == n]
+            if batch:
+                self.execute_batch(f'update "{schema}"."{table}" set kk{n} = %s, jj{n} = %s, ii{n} = %s, '
+                                   f'dir{n} = %s, len{n} = %s where id = %s', batch)
+        debug('cct: {} edge vertex reference(s) moved to the description from the solid corner', len(updates))
+
+    def align_stairstep_with_cct(self):
+        """ Make the stair-step topography (zt, buildings_2d, building_id/type
+        and the surface types) follow the cut surface.
+
+        The stair-step grid marks a column as building when the cell centre
+        lies inside the building outline, and keeps the terrain height of the
+        DEM. The cut surface follows the outline exactly and the terrain is
+        corrected next to walls, so the two disagree in roof-edge columns the
+        building covers only partly and where the terrain was raised. Here the
+        top land/roof face of every column sets the column's solid top,
+        T = round(z_centre / dz) (the face then lies in the topmost solid cell or
+        the first air cell above it):
+
+        - top face is a roof: the column is a building with nz = T - terrain;
+          a new building column takes the lid and type of the nearest building
+          cell, and grid.lid points to that building's landcover polygon, so the
+          column carries no vegetation/pavement/water type;
+        - top face is land: a building row is removed, grid.lid takes the land
+          face's polygon, and the terrain nz becomes T.
+
+        The step is idempotent (targets come from the faces), so running it
+        again after a staged cct_processing run changes nothing. """
+        schema = self.cfg.domain.case_schema
+        grid_t, bgrid_t = self.cfg.tables.grid, self.cfg.tables.buildings_grid
+        faces_t, lc_t = self.cfg.tables.slanted_faces, self.cfg.tables.landcover
+        dz = self.cfg.domain.dz
+        adjust = int(np.ceil((self.cfg.domain.oro_min - self.cfg.domain.origin_z) / dz))
+        progress('aligning the stair-step topography with the cut surface')
+
+        # top land/roof face per column: its centre height and land polygon
+        top = {}
+        for i, j, k, roof, cz, lid in self.execute(
+                f'select i, j, k, coalesce(isroof, false), st_z(center), lid from "{schema}"."{faces_t}" '
+                f'where not coalesce(iswall, false) and center is not null'):
+            if (i, j) not in top or k > top[(i, j)][0]:
+                top[(i, j)] = (k, roof, cz, lid)
+        grid = {(i, j): (gid, nz, lid) for gid, i, j, nz, lid in
+                self.execute(f'select id, i, j, nz, lid from "{schema}"."{grid_t}"')}
+        bnz = {gid: nz for gid, nz in self.execute(f'select id, nz from "{schema}"."{bgrid_t}"')}
+        land_lids = {lid for (lid,) in self.execute(
+            f'select lid from "{schema}"."{lc_t}" where not type between %s and %s',
+            (self.cfg.type_range.building_min, self.cfg.type_range.building_max))}
+
+        new_build, set_bnz, drop_build, set_lid, set_tnz, near_land = [], [], [], [], [], []
+        for c, (k, roof, cz, face_lid) in top.items():
+            if c not in grid:
+                continue
+            gid, tnz, glid = grid[c]
+            target = int(round(cz / dz))
+            terrain = tnz + adjust
+            if roof:
+                nz = max(target - terrain, 1)
+                if gid not in bnz:
+                    new_build.append((gid, nz))
+                elif bnz[gid] != nz:
+                    set_bnz.append((nz, nz * dz, gid))
+            else:
+                if gid in bnz:
+                    drop_build.append(gid)
+                    if face_lid in land_lids:
+                        if face_lid != glid:
+                            set_lid.append((face_lid, gid))
+                    elif glid not in land_lids:
+                        near_land.append(gid)
+                if target - adjust != tnz:
+                    set_tnz.append((target - adjust, (target - adjust - tnz) * dz, gid))
+
+        if set_bnz:
+            self.execute_batch(f'update "{schema}"."{bgrid_t}" set nz = %s, height = %s where id = %s', set_bnz)
+        if drop_build:
+            self.execute(f'delete from "{schema}"."{bgrid_t}" where id = any(%s)', (drop_build,))
+        if set_lid:
+            self.execute_batch(f'update "{schema}"."{grid_t}" set lid = %s where id = %s', set_lid)
+        if near_land:
+            # former building columns whose land face has no land polygon: nearest one
+            self.execute(f"""
+                update "{schema}"."{grid_t}" as g set lid = (
+                    select l.lid from "{schema}"."{lc_t}" as l
+                    where not l.type between %s and %s order by l.geom <-> g.point limit 1)
+                where g.id = any(%s)
+            """, (self.cfg.type_range.building_min, self.cfg.type_range.building_max, near_land))
+        if set_tnz:
+            self.execute_batch(f'update "{schema}"."{grid_t}" set nz = %s, height = height + %s where id = %s',
+                               set_tnz)
+        if new_build:
+            # one statement: every new column copies the nearest existing building cell
+            values = ', '.join(f'({gid}, {nz})' for gid, nz in new_build)
+            self.execute(f"""
+                with v(id, nz) as (values {values})
+                insert into "{schema}"."{bgrid_t}" (id, i, j, xcen, ycen, geom, point, lid, type, nz, height,
+                                                   has_bottom, is_bridge)
+                select g.id, g.i, g.j, g.xcen, g.ycen, g.geom, g.point, nb.lid, nb.type, v.nz, v.nz * {dz},
+                       false, false
+                from v join "{schema}"."{grid_t}" as g on g.id = v.id
+                cross join lateral (select b.lid, b.type from "{schema}"."{bgrid_t}" as b
+                                    where b.lid is not null order by b.geom <-> g.geom limit 1) as nb
+            """)
+            self.execute(f"""
+                update "{schema}"."{grid_t}" as g set lid = b.lid
+                from "{schema}"."{bgrid_t}" as b
+                where b.id = g.id and g.id = any(%s)
+            """, ([gid for gid, _ in new_build],))
+        progress('stair-step aligned: {} new building column(s), {} building height(s), {} building column(s) '
+                 'turned to ground, {} terrain height(s)',
+                 len(new_build), len(set_bnz), len(drop_build), len(set_tnz))
+
+    CCT_DONE_MARK = 'palm-gem: cct geometry complete'
+
+    def prepare_cct_flags(self):
+        """ Cut-cell topography runs without LOD2 and 3-D buildings, and only
+        processes buildings when the landcover still holds some: the CCT
+        outline merge and force_building_boundary can remove all of them in a
+        small domain, and the wall steps fail on an empty wall table. """
+        self.cfg.update_setting('lod2', False)
+        self.cfg.update_setting('has_3d_buildings', False)
+        n_build = self.fetchone(
+            f'select count(*) from "{self.cfg.domain.case_schema}"."{self.cfg.tables.landcover}" '
+            f'where type between %s and %s',
+            (self.cfg.type_range.building_min, self.cfg.type_range.building_max))
+        if self.cfg.get('has_buildings', False) and not n_build:
+            warning('do_cct: no building polygon left in the landcover; processing terrain only')
+        self.cfg.update_setting('has_buildings', bool(n_build))
+
+    def cct_geometry_complete(self):
+        """ True when slanted_surface_init has finished on the current case schema. """
+        res = self.fetch(
+            "select obj_description(to_regclass(%s), 'pg_class')",
+            (f'"{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_faces}"',))
+        return bool(res) and res[0][0] == self.CCT_DONE_MARK
 
     def preprocess_terrain_height(self):
         """ correct terrain height """
@@ -425,288 +621,288 @@ class CctProcessing(BaseTask):
                 # top, right are lower, correct height in both of them to min(hh, hdiag)
                 self.execute(sqlcorr, (min(hh, hdiag), i + 1, j, i, j + 1))
 
-        def create_slanted_walls_terrain(self):
-            """ So far dummy function, just idea """
-            # SELECT intersecting point from wall
-            progress('Processing connection between wall and adjacent terrain')
-            sqltext = f"""
-                drop table if exists "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_terr_wall}"; 
-                create table "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_terr_wall}" as 
-                select row_number() over () as id, point, false as j_line, false as i_line, 
-                       cast(null as double precision) as height, 
-                       cast(null as integer) as i,
-                       cast(null as integer) as j 
-                from (
-                    select point1 as point from "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_wall}" 
-                    union all 
-                    select point2 as point from "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_wall}"
-                ) as s 
-                group by point
-            """
-            self.execute(sqltext)
+    def create_slanted_walls_terrain(self):
+        """ So far dummy function, just idea """
+        # SELECT intersecting point from wall
+        progress('Processing connection between wall and adjacent terrain')
+        sqltext = f"""
+            drop table if exists "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_terr_wall}"; 
+            create table "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_terr_wall}" as 
+            select row_number() over () as id, point, false as j_line, false as i_line, 
+                   cast(null as double precision) as height, 
+                   cast(null as integer) as i,
+                   cast(null as integer) as j 
+            from (
+                select point1 as point from "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_wall}" 
+                union all 
+                select point2 as point from "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_wall}"
+            ) as s 
+            group by point
+        """
+        self.execute(sqltext)
 
-            debug('Finding if point is at i-line or j-line')
-            sqltext = f"""
-                update "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_terr_wall}" set 
-                j_line = case when abs((st_x(point) - {self.cfg.domain.origin_x}) / {self.cfg.domain.dx} - round((st_x(point) - {self.cfg.domain.origin_x}) / {self.cfg.domain.dx})) < 1e-10 then true else false end, 
-                i_line = case when abs((st_y(point) - {self.cfg.domain.origin_y}) / {self.cfg.domain.dy} - round((st_y(point) - {self.cfg.domain.origin_y}) / {self.cfg.domain.dy})) < 1e-10 then true else false end
-            """
-            self.execute(sqltext)
+        debug('Finding if point is at i-line or j-line')
+        sqltext = f"""
+            update "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_terr_wall}" set 
+            j_line = case when abs((st_x(point) - {self.cfg.domain.origin_x}) / {self.cfg.domain.dx} - round((st_x(point) - {self.cfg.domain.origin_x}) / {self.cfg.domain.dx})) < 1e-10 then true else false end, 
+            i_line = case when abs((st_y(point) - {self.cfg.domain.origin_y}) / {self.cfg.domain.dy} - round((st_y(point) - {self.cfg.domain.origin_y}) / {self.cfg.domain.dy})) < 1e-10 then true else false end
+        """
+        self.execute(sqltext)
 
-            debug('Calculating of i,j')
-            sqltext = f"""
-                update "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_terr_wall}" set 
-                i = floor((st_x(point) - {self.cfg.domain.origin_x}) / {self.cfg.domain.dx}), 
-                j = floor((st_y(point) - {self.cfg.domain.origin_y}) / {self.cfg.domain.dy})
-            """
-            self.execute(sqltext)
+        debug('Calculating of i,j')
+        sqltext = f"""
+            update "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_terr_wall}" set 
+            i = floor((st_x(point) - {self.cfg.domain.origin_x}) / {self.cfg.domain.dx}), 
+            j = floor((st_y(point) - {self.cfg.domain.origin_y}) / {self.cfg.domain.dy})
+        """
+        self.execute(sqltext)
 
-            sqltext = f"""
-                update "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_terr_wall}" tw set 
-                height = 
-                case when i_line then (floor((select max(height) from "{self.cfg.domain.case_schema}"."{self.cfg.tables.height_terr_corrected}" as th 
-                                             where (th.i = tw.i or th.i = tw.i + 1) and th.j = tw.j) / {self.cfg.domain.dz}) + 1) * {self.cfg.domain.dz} 
-                     else             (floor((select max(height) from "{self.cfg.domain.case_schema}"."{self.cfg.tables.height_terr_corrected}" as th 
-                                             where (th.j = tw.j or th.j = tw.j + 1) and th.i = tw.i) / {self.cfg.domain.dz}) + 1) * {self.cfg.domain.dz} 
-                     end
-            """
-            self.execute(sqltext)
+        sqltext = f"""
+            update "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_terr_wall}" tw set 
+            height = 
+            case when i_line then (floor((select max(height) from "{self.cfg.domain.case_schema}"."{self.cfg.tables.height_terr_corrected}" as th 
+                                         where (th.i = tw.i or th.i = tw.i + 1) and th.j = tw.j) / {self.cfg.domain.dz}) + 1) * {self.cfg.domain.dz} 
+                 else             (floor((select max(height) from "{self.cfg.domain.case_schema}"."{self.cfg.tables.height_terr_corrected}" as th 
+                                         where (th.j = tw.j or th.j = tw.j + 1) and th.i = tw.i) / {self.cfg.domain.dz}) + 1) * {self.cfg.domain.dz} 
+                 end
+        """
+        self.execute(sqltext)
 
-            # add those point into terrain correction
-            sqltext = f"""
-                insert into "{self.cfg.domain.case_schema}"."{self.cfg.tables.height_terr_corrected}" 
-                select 
-                    st_x(point), st_y(point), i, j, null, height, height, true, false, point 
-                from "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_terr_wall}"
-            """
-            self.execute(sqltext)
+        # add those point into terrain correction
+        sqltext = f"""
+            insert into "{self.cfg.domain.case_schema}"."{self.cfg.tables.height_terr_corrected}" 
+            select 
+                st_x(point), st_y(point), i, j, null, height, height, true, false, point 
+            from "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_terr_wall}"
+        """
+        self.execute(sqltext)
 
-            # Do some filtering in height_terr_corrected table
-            debug('Small filtering inside {} table', self.cfg.tables.height_terr_corrected)
-            sqltext_1 = f"""
-                with tr as (select i, j, height, iswall from "{self.cfg.domain.case_schema}"."{self.cfg.tables.height_terr_corrected}" where not iswall) 
-                select tc.i, tc.j, tr.height 
-                from "{self.cfg.domain.case_schema}"."{self.cfg.tables.height_terr_corrected}" as tc, tr 
-                where ((tc.i + 1 = tr.i and tc.j     = tr.j)     or  
-                       (tc.i     = tr.i and tc.j + 1 = tr.j)     or 
-                       (tc.i     = tr.i and tc.j     = tr.j)   ) and 
-                       tc.height < tr.height and tc.iswall 
-                order by tc.i, tc.j
-            """
+        # Do some filtering in height_terr_corrected table
+        debug('Small filtering inside {} table', self.cfg.tables.height_terr_corrected)
+        sqltext_1 = f"""
+            with tr as (select i, j, height, iswall from "{self.cfg.domain.case_schema}"."{self.cfg.tables.height_terr_corrected}" where not iswall) 
+            select tc.i, tc.j, tr.height 
+            from "{self.cfg.domain.case_schema}"."{self.cfg.tables.height_terr_corrected}" as tc, tr 
+            where ((tc.i + 1 = tr.i and tc.j     = tr.j)     or  
+                   (tc.i     = tr.i and tc.j + 1 = tr.j)     or 
+                   (tc.i     = tr.i and tc.j     = tr.j)   ) and 
+                   tc.height < tr.height and tc.iswall 
+            order by tc.i, tc.j
+        """
 
-            sqltext_2 = f"""
-                with hc_diag  as (select i, j, height from "{self.cfg.domain.case_schema}"."{self.cfg.tables.height_terr_corrected}" where not iswall), 
-                     hc_top   as (select i, j, height from "{self.cfg.domain.case_schema}"."{self.cfg.tables.height_terr_corrected}" where not iswall), 
-                     hc_right as (select i, j, height from "{self.cfg.domain.case_schema}"."{self.cfg.tables.height_terr_corrected}" where not iswall) 
-    
-                select h.i, h.j, h.height as h_height, hc_diag.height as h_diag, hc_top.height as h_top, hc_right.height as h_right,
-                       (h.height < hc_top.height and h.height < hc_right.height and hc_diag.height < hc_top.height and hc_diag.height < hc_right.height) as sml,
-                       (h.height > hc_top.height and h.height > hc_right.height and hc_diag.height > hc_top.height and hc_diag.height > hc_right.height) as hgh 
-                from "{self.cfg.domain.case_schema}"."{self.cfg.tables.height_terr_corrected}" h 
-                left join hc_diag  on hc_diag.i  = h.i + 1 and hc_diag.j  = h.j + 1 and hc_diag.height is not null and not iswall 
-                left join hc_top   on hc_top.i   = h.i     and hc_top.j   = h.j + 1 and hc_top.height is not null and not iswall 
-                left join hc_right on hc_right.i = h.i + 1 and hc_right.j = h.j     and hc_right.height is not null and not iswall 
-                where
-                     (h.height < hc_top.height and h.height < hc_right.height and hc_diag.height < hc_top.height and hc_diag.height < hc_right.height) or 
-                     ((h.height > hc_top.height and h.height > hc_right.height and hc_diag.height > hc_top.height and hc_diag.height > hc_right.height) and not h.iswall) 
-                order by h.i, h.j
-            """
+        sqltext_2 = f"""
+            with hc_diag  as (select i, j, height from "{self.cfg.domain.case_schema}"."{self.cfg.tables.height_terr_corrected}" where not iswall), 
+                 hc_top   as (select i, j, height from "{self.cfg.domain.case_schema}"."{self.cfg.tables.height_terr_corrected}" where not iswall), 
+                 hc_right as (select i, j, height from "{self.cfg.domain.case_schema}"."{self.cfg.tables.height_terr_corrected}" where not iswall) 
 
-            sqlcorr_1 = f"""
-                update "{self.cfg.domain.case_schema}"."{self.cfg.tables.height_terr_corrected}" set 
-                height = %s 
-                where i = %s and j = %s and iswall
-            """
+            select h.i, h.j, h.height as h_height, hc_diag.height as h_diag, hc_top.height as h_top, hc_right.height as h_right,
+                   (h.height < hc_top.height and h.height < hc_right.height and hc_diag.height < hc_top.height and hc_diag.height < hc_right.height) as sml,
+                   (h.height > hc_top.height and h.height > hc_right.height and hc_diag.height > hc_top.height and hc_diag.height > hc_right.height) as hgh 
+            from "{self.cfg.domain.case_schema}"."{self.cfg.tables.height_terr_corrected}" h 
+            left join hc_diag  on hc_diag.i  = h.i + 1 and hc_diag.j  = h.j + 1 and hc_diag.height is not null and not iswall 
+            left join hc_top   on hc_top.i   = h.i     and hc_top.j   = h.j + 1 and hc_top.height is not null and not iswall 
+            left join hc_right on hc_right.i = h.i + 1 and hc_right.j = h.j     and hc_right.height is not null and not iswall 
+            where
+                 (h.height < hc_top.height and h.height < hc_right.height and hc_diag.height < hc_top.height and hc_diag.height < hc_right.height) or 
+                 ((h.height > hc_top.height and h.height > hc_right.height and hc_diag.height > hc_top.height and hc_diag.height > hc_right.height) and not h.iswall) 
+            order by h.i, h.j
+        """
 
-            sqlcorr_2 = f"""
+        sqlcorr_1 = f"""
+            update "{self.cfg.domain.case_schema}"."{self.cfg.tables.height_terr_corrected}" set 
+            height = %s 
+            where i = %s and j = %s and iswall
+        """
+
+        sqlcorr_2 = f"""
+            update "{self.cfg.domain.case_schema}"."{self.cfg.tables.height_terr_corrected}" set 
+            height = %s 
+            where ((i = %s and j = %s) or (i = %s and j = %s)) and not iswall
+        """
+
+        sqltext_inside_update = f"""
+            update "{self.cfg.domain.case_schema}"."{self.cfg.tables.height_terr_corrected}" as tc set 
+            height = (select max(height) - 0.1 from "{self.cfg.domain.case_schema}"."{self.cfg.tables.height_terr_corrected}" as tr 
+                      where not inside and st_dwithin(tc.geom, tr.geom, {self.cfg.slanted_pars.dist2edge_filter}) limit 1) 
+            where inside
+        """
+
+        ij2corr = [1]
+        while len(ij2corr) > 0:
+            self.execute(sqltext_inside_update)
+            ij2corr = self.execute(sqltext_1)
+
+            debug('Updating places')
+            for i, j, height in ij2corr:
+                height = (np.floor(height / self.cfg.domain.dz) + 1) * self.cfg.domain.dz
+                verbose('Height correction for [i,j]:[{},{}], height = {} ', i, j, height)
+                self.execute(sqlcorr_1, (height, i, j))
+
+            # now filter special cases
+            ij2corr = self.execute(sqltext_2)
+
+            for i, j, hh, hdiag, htop, hright, sml, hgh in ij2corr:
+                verbose('Height correction for [i,j]:[{},{}]', i, j)
+                verbose('\th:{}, hdiag:{}, htop:{}, hright:{}, sml: {}, hgh: {}', hh, hdiag, htop, hright, sml, hgh)
+                if sml:
+                    # h and hdiag are both lower, correct height in both of them to min(htop,hright)
+                    self.execute(sqlcorr_2, (min(htop, hright), i, j, i + 1, j + 1))
+                else:
+                    # top, right are lower, correct height in both of them to min(hh, hdiag)
+                    self.execute(sqlcorr_2, (min(hh, hdiag), i + 1, j, i, j + 1))
+
+        # -- OPTIMIZE HERE
+        debug('Correcting the ones near the wall (just in case)')
+        dist2edge = self.cfg.slanted_pars.dist2edge
+        sqltext = f"""
+            update "{self.cfg.domain.case_schema}"."{self.cfg.tables.height_terr_corrected}" as hc set height = 
+            (select height from "{self.cfg.domain.case_schema}"."{self.cfg.tables.height_terr_corrected}" as wo 
+             where iswall and st_dwithin(wo.geom, hc.geom, 2.0 * {dist2edge}) 
+             order by st_distance(wo.geom, hc.geom) 
+             limit 1) 
+            from "{self.cfg.domain.case_schema}"."{self.cfg.tables.walls_outer}" as wo 
+            where not iswall and st_distance(hc.geom, wo.geom) < {dist2edge}
+        """
+        self.execute(sqltext)
+
+        # now filter special cases
+        sqltext = f"""
+            with hc_diag  as (select i, j, height from "{self.cfg.domain.case_schema}"."{self.cfg.tables.height_terr_corrected}" where not iswall), 
+                 hc_top   as (select i, j, height from "{self.cfg.domain.case_schema}"."{self.cfg.tables.height_terr_corrected}" where not iswall), 
+                 hc_right as (select i, j, height from "{self.cfg.domain.case_schema}"."{self.cfg.tables.height_terr_corrected}" where not iswall) 
+
+            select h.i, h.j, h.height as h_height, hc_diag.height as h_diag, hc_top.height as h_top, hc_right.height as h_right,
+                   (h.height < hc_top.height and h.height < hc_right.height and hc_diag.height < hc_top.height and hc_diag.height < hc_right.height) as sml,
+                   (h.height > hc_top.height and h.height > hc_right.height and hc_diag.height > hc_top.height and hc_diag.height > hc_right.height) as hgh 
+            from "{self.cfg.domain.case_schema}"."{self.cfg.tables.height_terr_corrected}" h 
+            left join hc_diag  on hc_diag.i  = h.i + 1 and hc_diag.j  = h.j + 1 and hc_diag.height is not null and not iswall 
+            left join hc_top   on hc_top.i   = h.i     and hc_top.j   = h.j + 1 and hc_top.height is not null and not iswall 
+            left join hc_right on hc_right.i = h.i + 1 and hc_right.j = h.j     and hc_right.height is not null and not iswall 
+            where
+                 (h.height < hc_top.height and h.height < hc_right.height and hc_diag.height < hc_top.height and hc_diag.height < hc_right.height) or 
+                 (h.height > hc_top.height and h.height > hc_right.height and hc_diag.height > hc_top.height and hc_diag.height > hc_right.height) 
+            order by h.i, h.j
+        """
+        ij2corr = [1]
+        while len(ij2corr) > 0:
+            ij2corr = self.execute(sqltext)
+
+            sqlcorr = f"""
                 update "{self.cfg.domain.case_schema}"."{self.cfg.tables.height_terr_corrected}" set 
                 height = %s 
                 where ((i = %s and j = %s) or (i = %s and j = %s)) and not iswall
             """
+            for i, j, hh, hdiag, htop, hright, sml, hgh in ij2corr:
+                verbose('Height correction for [i,j]:[{},{}]', i, j)
+                verbose('\th:{}, hdiag:{}, htop:{}, hright:{}, sml: {}, hgh: {}', hh, hdiag, htop, hright, sml, hgh)
+                if sml:
+                    # h and hdiag are both lower, correct height in both of them to min(htop,hright)
+                    self.execute(sqlcorr, (min(htop, hright), i, j, i + 1, j + 1))
+                else:
+                    # top, right are lower, correct height in both of them to min(hh, hdiag)
+                    self.execute(sqlcorr, (min(hh, hdiag), i + 1, j, i, j + 1))
 
-            sqltext_inside_update = f"""
-                update "{self.cfg.domain.case_schema}"."{self.cfg.tables.height_terr_corrected}" as tc set 
-                height = (select max(height) - 0.1 from "{self.cfg.domain.case_schema}"."{self.cfg.tables.height_terr_corrected}" as tr 
-                          where not inside and st_dwithin(tc.geom, tr.geom, {self.cfg.slanted_pars.dist2edge_filter}) limit 1) 
-                where inside
-            """
+        #### PROCESS CONNECTION BETWEEN WALL AND BUILDING WALL
+        progress('Processing connection between wall and adjacent terrain')
+        sqltext = f"""
+            drop table if exists "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_terr_wall}"; 
+            create table if not exists "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_terr_wall}" as 
+            select id, i, j, point1 as w_point1, point2 as w_point2, 
+                   split_terr_wall, norm 
+            from "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_wall}"
+        """
+        self.execute(sqltext)
 
-            ij2corr = [1]
-            while len(ij2corr) > 0:
-                self.execute(sqltext_inside_update)
-                ij2corr = self.execute(sqltext_1)
+        # add indexes and unique indexes
+        sqltext = f"""
+            create index terr_wall_id_idx on "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_terr_wall}" (id); 
+            create index terr_wall_ji_idx on "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_terr_wall}" (i asc, j asc)
+        """
+        self.execute(sqltext)
 
-                debug('Updating places')
-                for i, j, height in ij2corr:
-                    height = (np.floor(height / self.cfg.domain.dz) + 1) * self.cfg.domain.dz
-                    verbose('Height correction for [i,j]:[{},{}], height = {} ', i, j, height)
-                    self.execute(sqlcorr_1, (height, i, j))
+        # Add extra columns to table
+        debug('Adding extra column in terr_wall table')
+        sqltext = f"""
+            alter table "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_terr_wall}" 
+            add column if not exists cent   geometry("point", %s), 
+            add column if not exists norm   geometry("point", %s), 
+            add column if not exists point1 geometry("point", %s), 
+            add column if not exists point2 geometry("point", %s), 
+            add column if not exists point3 geometry("point", %s), 
+            add column if not exists point4 geometry("point", %s), 
+            add column if not exists point5 geometry("point", %s), 
+            add column if not exists point6 geometry("point", %s), 
+            add column if not exists z1 double precision, 
+            add column if not exists z2 double precision, 
+            add column if not exists z3 double precision, 
+            add column if not exists z4 double precision, 
+            add column if not exists z5 double precision, 
+            add column if not exists z6 double precision, 
+            add column if not exists is_wall1 boolean, 
+            add column if not exists is_wall2 boolean, 
+            add column if not exists is_wall3 boolean, 
+            add column if not exists is_wall4 boolean, 
+            add column if not exists is_wall5 boolean, 
+            add column if not exists is_wall6 boolean, 
+            add column if not exists n_edges integer,
+            add column if not exists geom3d geometry("polygonz", %s)
+        """
+        self.execute(sqltext, (
+            self.cfg.srid_palm, self.cfg.srid_palm, self.cfg.srid_palm, self.cfg.srid_palm,
+            self.cfg.srid_palm, self.cfg.srid_palm, self.cfg.srid_palm, self.cfg.srid_palm,
+            self.cfg.srid_palm
+        ))
 
-                # now filter special cases
-                ij2corr = self.execute(sqltext_2)
+        # Assign points to polygon corners
+        debug('Assigning building corners')
+        sqltext = f"""
+            update "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_terr_wall}" set 
+            n_edges = st_npoints(split_terr_wall) - 1, 
+            point1 = case when st_npoints(split_terr_wall) > 1 then st_pointn(st_boundary(split_terr_wall), 1) else null end, 
+            point2 = case when st_npoints(split_terr_wall) > 2 then st_pointn(st_boundary(split_terr_wall), 2) else null end, 
+            point3 = case when st_npoints(split_terr_wall) > 3 then st_pointn(st_boundary(split_terr_wall), 3) else null end, 
+            point4 = case when st_npoints(split_terr_wall) > 4 then st_pointn(st_boundary(split_terr_wall), 4) else null end, 
+            point5 = case when st_npoints(split_terr_wall) > 5 then st_pointn(st_boundary(split_terr_wall), 5) else null end
+        """
+        self.execute(sqltext)
 
-                for i, j, hh, hdiag, htop, hright, sml, hgh in ij2corr:
-                    verbose('Height correction for [i,j]:[{},{}]', i, j)
-                    verbose('\th:{}, hdiag:{}, htop:{}, hright:{}, sml: {}, hgh: {}', hh, hdiag, htop, hright, sml, hgh)
-                    if sml:
-                        # h and hdiag are both lower, correct height in both of them to min(htop,hright)
-                        self.execute(sqlcorr_2, (min(htop, hright), i, j, i + 1, j + 1))
-                    else:
-                        # top, right are lower, correct height in both of them to min(hh, hdiag)
-                        self.execute(sqlcorr_2, (min(hh, hdiag), i + 1, j, i, j + 1))
+        # decide which are wall points
+        debug('Assigning which point is wall point')
+        sqltext = f"""
+            update "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_terr_wall}" set 
+            is_wall1 = w_point1 = point1 or w_point2 = point1, 
+            is_wall2 = w_point1 = point2 or w_point2 = point2, 
+            is_wall3 = w_point1 = point3 or w_point2 = point3, 
+            is_wall4 = w_point1 = point4 or w_point2 = point4, 
+            is_wall5 = w_point1 = point5 or w_point2 = point5
+        """
+        self.execute(sqltext)
 
-            # -- OPTIMIZE HERE
-            debug('Correcting the ones near the wall (just in case)')
-            dist2edge = self.cfg.slanted_pars.dist2edge
-            sqltext = f"""
-                update "{self.cfg.domain.case_schema}"."{self.cfg.tables.height_terr_corrected}" as hc set height = 
-                (select height from "{self.cfg.domain.case_schema}"."{self.cfg.tables.height_terr_corrected}" as wo 
-                 where iswall and st_dwithin(wo.geom, hc.geom, 2.0 * {dist2edge}) 
-                 order by st_distance(wo.geom, hc.geom) 
-                 limit 1) 
-                from "{self.cfg.domain.case_schema}"."{self.cfg.tables.walls_outer}" as wo 
-                where not iswall and st_distance(hc.geom, wo.geom) < {dist2edge}
-            """
-            self.execute(sqltext)
+        # assign height to each point, either from terrain height or from building (combination of terrain and building)
+        debug('Assigning height to terr_wall points')
+        sqltext = f"""
+            update "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_terr_wall}" set 
+            z1 = (select height from "{self.cfg.domain.case_schema}"."{self.cfg.tables.height_terr_corrected}" where st_dwithin(point1, geom, {dist2edge}) order by st_distance(point1, geom) limit 1),  
+            z2 = (select height from "{self.cfg.domain.case_schema}"."{self.cfg.tables.height_terr_corrected}" where st_dwithin(point2, geom, {dist2edge}) order by st_distance(point2, geom) limit 1),  
+            z3 = (select height from "{self.cfg.domain.case_schema}"."{self.cfg.tables.height_terr_corrected}" where st_dwithin(point3, geom, {dist2edge}) order by st_distance(point3, geom) limit 1),  
+            z4 = (select height from "{self.cfg.domain.case_schema}"."{self.cfg.tables.height_terr_corrected}" where st_dwithin(point4, geom, {dist2edge}) order by st_distance(point4, geom) limit 1),  
+            z5 = (select height from "{self.cfg.domain.case_schema}"."{self.cfg.tables.height_terr_corrected}" where st_dwithin(point5, geom, {dist2edge}) order by st_distance(point5, geom) limit 1)
+        """
+        self.execute(sqltext)
 
-            # now filter special cases
-            sqltext = f"""
-                with hc_diag  as (select i, j, height from "{self.cfg.domain.case_schema}"."{self.cfg.tables.height_terr_corrected}" where not iswall), 
-                     hc_top   as (select i, j, height from "{self.cfg.domain.case_schema}"."{self.cfg.tables.height_terr_corrected}" where not iswall), 
-                     hc_right as (select i, j, height from "{self.cfg.domain.case_schema}"."{self.cfg.tables.height_terr_corrected}" where not iswall) 
-    
-                select h.i, h.j, h.height as h_height, hc_diag.height as h_diag, hc_top.height as h_top, hc_right.height as h_right,
-                       (h.height < hc_top.height and h.height < hc_right.height and hc_diag.height < hc_top.height and hc_diag.height < hc_right.height) as sml,
-                       (h.height > hc_top.height and h.height > hc_right.height and hc_diag.height > hc_top.height and hc_diag.height > hc_right.height) as hgh 
-                from "{self.cfg.domain.case_schema}"."{self.cfg.tables.height_terr_corrected}" h 
-                left join hc_diag  on hc_diag.i  = h.i + 1 and hc_diag.j  = h.j + 1 and hc_diag.height is not null and not iswall 
-                left join hc_top   on hc_top.i   = h.i     and hc_top.j   = h.j + 1 and hc_top.height is not null and not iswall 
-                left join hc_right on hc_right.i = h.i + 1 and hc_right.j = h.j     and hc_right.height is not null and not iswall 
-                where
-                     (h.height < hc_top.height and h.height < hc_right.height and hc_diag.height < hc_top.height and hc_diag.height < hc_right.height) or 
-                     (h.height > hc_top.height and h.height > hc_right.height and hc_diag.height > hc_top.height and hc_diag.height > hc_right.height) 
-                order by h.i, h.j
-            """
-            ij2corr = [1]
-            while len(ij2corr) > 0:
-                ij2corr = self.execute(sqltext)
-
-                sqlcorr = f"""
-                    update "{self.cfg.domain.case_schema}"."{self.cfg.tables.height_terr_corrected}" set 
-                    height = %s 
-                    where ((i = %s and j = %s) or (i = %s and j = %s)) and not iswall
-                """
-                for i, j, hh, hdiag, htop, hright, sml, hgh in ij2corr:
-                    verbose('Height correction for [i,j]:[{},{}]', i, j)
-                    verbose('\th:{}, hdiag:{}, htop:{}, hright:{}, sml: {}, hgh: {}', hh, hdiag, htop, hright, sml, hgh)
-                    if sml:
-                        # h and hdiag are both lower, correct height in both of them to min(htop,hright)
-                        self.execute(sqlcorr, (min(htop, hright), i, j, i + 1, j + 1))
-                    else:
-                        # top, right are lower, correct height in both of them to min(hh, hdiag)
-                        self.execute(sqlcorr, (min(hh, hdiag), i + 1, j, i, j + 1))
-
-            #### PROCESS CONNECTION BETWEEN WALL AND BUILDING WALL
-            progress('Processing connection between wall and adjacent terrain')
-            sqltext = f"""
-                drop table if exists "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_terr_wall}"; 
-                create table if not exists "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_terr_wall}" as 
-                select id, i, j, point1 as w_point1, point2 as w_point2, 
-                       split_terr_wall, norm 
-                from "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_wall}"
-            """
-            self.execute(sqltext)
-
-            # add indexes and unique indexes
-            sqltext = f"""
-                create index terr_wall_id_idx on "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_terr_wall}" (id); 
-                create index terr_wall_ji_idx on "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_terr_wall}" (i asc, j asc)
-            """
-            self.execute(sqltext)
-
-            # Add extra columns to table
-            debug('Adding extra column in terr_wall table')
-            sqltext = f"""
-                alter table "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_terr_wall}" 
-                add column if not exists cent   geometry("point", %s), 
-                add column if not exists norm   geometry("point", %s), 
-                add column if not exists point1 geometry("point", %s), 
-                add column if not exists point2 geometry("point", %s), 
-                add column if not exists point3 geometry("point", %s), 
-                add column if not exists point4 geometry("point", %s), 
-                add column if not exists point5 geometry("point", %s), 
-                add column if not exists point6 geometry("point", %s), 
-                add column if not exists z1 double precision, 
-                add column if not exists z2 double precision, 
-                add column if not exists z3 double precision, 
-                add column if not exists z4 double precision, 
-                add column if not exists z5 double precision, 
-                add column if not exists z6 double precision, 
-                add column if not exists is_wall1 boolean, 
-                add column if not exists is_wall2 boolean, 
-                add column if not exists is_wall3 boolean, 
-                add column if not exists is_wall4 boolean, 
-                add column if not exists is_wall5 boolean, 
-                add column if not exists is_wall6 boolean, 
-                add column if not exists n_edges integer,
-                add column if not exists geom3d geometry("polygonz", %s)
-            """
-            self.execute(sqltext, (
-                self.cfg.srid_palm, self.cfg.srid_palm, self.cfg.srid_palm, self.cfg.srid_palm,
-                self.cfg.srid_palm, self.cfg.srid_palm, self.cfg.srid_palm, self.cfg.srid_palm,
-                self.cfg.srid_palm
-            ))
-
-            # Assign points to polygon corners
-            debug('Assigning building corners')
-            sqltext = f"""
-                update "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_terr_wall}" set 
-                n_edges = st_npoints(split_terr_wall) - 1, 
-                point1 = case when st_npoints(split_terr_wall) > 1 then st_pointn(st_boundary(split_terr_wall), 1) else null end, 
-                point2 = case when st_npoints(split_terr_wall) > 2 then st_pointn(st_boundary(split_terr_wall), 2) else null end, 
-                point3 = case when st_npoints(split_terr_wall) > 3 then st_pointn(st_boundary(split_terr_wall), 3) else null end, 
-                point4 = case when st_npoints(split_terr_wall) > 4 then st_pointn(st_boundary(split_terr_wall), 4) else null end, 
-                point5 = case when st_npoints(split_terr_wall) > 5 then st_pointn(st_boundary(split_terr_wall), 5) else null end
-            """
-            self.execute(sqltext)
-
-            # decide which are wall points
-            debug('Assigning which point is wall point')
-            sqltext = f"""
-                update "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_terr_wall}" set 
-                is_wall1 = w_point1 = point1 or w_point2 = point1, 
-                is_wall2 = w_point1 = point2 or w_point2 = point2, 
-                is_wall3 = w_point1 = point3 or w_point2 = point3, 
-                is_wall4 = w_point1 = point4 or w_point2 = point4, 
-                is_wall5 = w_point1 = point5 or w_point2 = point5
-            """
-            self.execute(sqltext)
-
-            # assign height to each point, either from terrain height or from building (combination of terrain and building)
-            debug('Assigning height to terr_wall points')
-            sqltext = f"""
-                update "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_terr_wall}" set 
-                z1 = (select height from "{self.cfg.domain.case_schema}"."{self.cfg.tables.height_terr_corrected}" where st_dwithin(point1, geom, {dist2edge}) order by st_distance(point1, geom) limit 1),  
-                z2 = (select height from "{self.cfg.domain.case_schema}"."{self.cfg.tables.height_terr_corrected}" where st_dwithin(point2, geom, {dist2edge}) order by st_distance(point2, geom) limit 1),  
-                z3 = (select height from "{self.cfg.domain.case_schema}"."{self.cfg.tables.height_terr_corrected}" where st_dwithin(point3, geom, {dist2edge}) order by st_distance(point3, geom) limit 1),  
-                z4 = (select height from "{self.cfg.domain.case_schema}"."{self.cfg.tables.height_terr_corrected}" where st_dwithin(point4, geom, {dist2edge}) order by st_distance(point4, geom) limit 1),  
-                z5 = (select height from "{self.cfg.domain.case_schema}"."{self.cfg.tables.height_terr_corrected}" where st_dwithin(point5, geom, {dist2edge}) order by st_distance(point5, geom) limit 1)
-            """
-            self.execute(sqltext)
-
-            # create 3d polygons to check
-            debug('Create 3d terr_height polygons')
-            sqltext = f"""
-                update "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_terr_wall}" set 
-                geom3d = st_setsrid(st_convexhull(st_collect(array[
-                    st_makepoint(st_x(point1), st_y(point1), z1), 
-                    st_makepoint(st_x(point2), st_y(point2), z2), 
-                    st_makepoint(st_x(point3), st_y(point3), z3), 
-                    st_makepoint(st_x(point4), st_y(point4), z4), 
-                    st_makepoint(st_x(point5), st_y(point5), z5)
-                ])), %s)
-            """
-            self.execute(sqltext, (self.cfg.srid_palm,))
+        # create 3d polygons to check
+        debug('Create 3d terr_height polygons')
+        sqltext = f"""
+            update "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_terr_wall}" set 
+            geom3d = st_setsrid(st_convexhull(st_collect(array[
+                st_makepoint(st_x(point1), st_y(point1), z1), 
+                st_makepoint(st_x(point2), st_y(point2), z2), 
+                st_makepoint(st_x(point3), st_y(point3), z3), 
+                st_makepoint(st_x(point4), st_y(point4), z4), 
+                st_makepoint(st_x(point5), st_y(point5), z5)
+            ])), %s)
+        """
+        self.execute(sqltext, (self.cfg.srid_palm,))
 
     def create_slanted_terrain(self):
         """ create slanted terrain """
@@ -909,7 +1105,7 @@ class CctProcessing(BaseTask):
             intersec = st_collect(st_startpoint(st_geometryn(st_intersection(geom, wall_geom),2)), 
                                   st_endpoint(st_geometryn(st_intersection(geom, wall_geom),1)) 
                                   ) 
-            where st_numgeometries(st_intersection(geom, wall_geom)) = 3 and st_npoints(intersec) > 2
+            where st_numgeometries(st_intersection(geom, wall_geom)) > 2 and st_npoints(intersec) > 2
         """
         self.execute(sqltext)
 
@@ -1911,6 +2107,11 @@ class CctProcessing(BaseTask):
                         x_vert.append(vert[lastidx + idx][0])
                         y_vert.append(vert[lastidx + idx][1])
                         z_vert.append(vert[lastidx + idx][2])
+                # n_vert counts the closing point; walk the ring over the distinct
+                # points only, otherwise point 0 is its own neighbour and a face with
+                # 6 distinct points overflows the 7-row arrays below
+                if len(x_vert) > 1 and (x_vert[-1], y_vert[-1], z_vert[-1]) == (x_vert[0], y_vert[0], z_vert[0]):
+                    x_vert, y_vert, z_vert = x_vert[:-1], y_vert[:-1], z_vert[:-1]
                 x_vert = np.asarray(x_vert)
                 y_vert = np.asarray(y_vert)
                 z_vert = np.asarray(z_vert)
@@ -1983,7 +2184,7 @@ class CctProcessing(BaseTask):
                         st_setsrid(st_makepoint(%s, %s, %s), %s) 
                 )
             """
-            self.executemany(sqltext, to_insert)
+            self.execute_batch(sqltext, to_insert)
 
             debug('updating 3d polygon')
             sqltext = f"""
@@ -2045,7 +2246,7 @@ class CctProcessing(BaseTask):
 
         if self.cfg.slanted_pars.clean_up:
             self.execute(
-                f'alter table "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_terrain_gridded}" drop column rgid, drop column rijk')
+                f'alter table "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_terrain_gridded}" drop column if exists rgid, drop column if exists rijk')
 
     def create_grid_slanted_roof(self):
         """ processing gridding slanted roof """
@@ -2305,6 +2506,9 @@ class CctProcessing(BaseTask):
                             x_vert.append(vert[lastidx + idx][0])
                             y_vert.append(vert[lastidx + idx][1])
                             z_vert.append(vert[lastidx + idx][2])
+                    # distinct ring points only (see create_grid_slanted_terrain)
+                    if len(x_vert) > 1 and (x_vert[-1], y_vert[-1], z_vert[-1]) == (x_vert[0], y_vert[0], z_vert[0]):
+                        x_vert, y_vert, z_vert = x_vert[:-1], y_vert[:-1], z_vert[:-1]
                     x_vert = np.asarray(x_vert)
                     y_vert = np.asarray(y_vert)
                     z_vert = np.asarray(z_vert)
@@ -2387,7 +2591,7 @@ class CctProcessing(BaseTask):
                                             st_setsrid(st_makepoint(%s, %s, %s), %s) 
                                             )  
                 """
-                self.executemany(sqltext, to_insert)
+                self.execute_batch(sqltext, to_insert)
 
                 # create polygon
                 debug('updating 3d polygon')
@@ -2427,6 +2631,30 @@ class CctProcessing(BaseTask):
         """ merging roof edges with walls """
         progress('merging grid faces of terrain and walls')
 
+        # A flat terrain face lying exactly on a grid level z = (k-1)*dz is
+        # filed as the floor of cell k (see initialize_slanted_faces). When a
+        # wall starts on that level in the same column, cell k would hold the
+        # terrain and the lowest wall piece, and the merge below would turn
+        # them into one face sloping from the floor to the wall top. A
+        # neighbour whose terrain lies a little lower keeps a vertical wall in
+        # cell k, so the two faces no longer meet on their common cell face and
+        # the surface opens there. Such a terrain face is filed as the top of
+        # cell k-1 instead (when that cell is empty): the wall in cell k then
+        # stays vertical like its neighbours.
+        dz = self.cfg.domain.dz
+        moved = self.execute(f"""
+            update "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_faces}" as t set k = t.k - 1
+            where t.isterr and t.k > 1
+              and (select bool_and(abs(st_z(p.geom) - (t.k - 1) * {dz}) < 1e-6) from st_dumppoints(t.geom) as p)
+              and exists (select 1 from "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_faces}" as w
+                          where w.iswall and w.i = t.i and w.j = t.j and w.k = t.k)
+              and not exists (select 1 from "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_faces}" as o
+                              where o.i = t.i and o.j = t.j and o.k = t.k - 1)
+            returning t.id
+        """)
+        if moved:
+            verbose('{} flat terrain face(s) under a wall moved to the cell below', len(moved))
+
         debug('finding duplicates')
         # find all aggregated faces, create new table with aggregated ones
         sqltext = f"""
@@ -2444,38 +2672,41 @@ class CctProcessing(BaseTask):
         j_all = [x[1] for x in duplicits]
         k_all = [x[2] for x in duplicits]
 
-        # build dynamic filter condition
+        # Pair the wall and the terrain face of each cell by its (i, j, k). The
+        # merge needs exactly one of each per cell. Matching two separately
+        # fetched lists by position (as before) breaks as soon as one cell holds
+        # two terrain pieces and another two walls: the counts still agree but
+        # every later wall is merged with the wrong terrain and filed under the
+        # wrong cell. Cells that do not hold one of each are left unmerged.
         sqltext_ijk = ' or '.join([f'(i = {i} and j = {j} and k = {k})' for i, j, k in zip(i_all, j_all, k_all)])
-
-        # select all wid
-        debug('finding all wids')
-        sqltext = f'select wid from "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_faces}" where iswall and ({sqltext_ijk}) order by i, j, k'
-        wid = self.execute(sqltext)
-        # sql_debug(self.connection)
-        # self.connection.commit()
-
-        if len(i_all) != len(wid):
-            error('number of items in i_all is not the same as in wid')
-            sys.exit(1)
-
-        # get all wall coordinates
-        debug('selecting all wall coordinates')
         sqltext = f"""
-            select 
-            array[st_x(vert1), st_y(vert1), st_z(vert1)],  
-            array[st_x(vert2), st_y(vert2), st_z(vert2)], 
-            array[st_x(vert3), st_y(vert3), st_z(vert3)], 
-            array[st_x(vert4), st_y(vert4), st_z(vert4)], 
-            array[st_x(vert5), st_y(vert5), st_z(vert5)], 
-            array[st_x(vert6), st_y(vert6), st_z(vert6)], 
-            array[st_x(vert7), st_y(vert7), st_z(vert7)] 
-            from "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_faces}" 
-            where {sqltext_ijk} and iswall 
-            order by i, j, k
+            select i, j, k, coalesce(iswall, false), wid,
+            array[st_x(vert1), st_y(vert1), st_z(vert1)],
+            array[st_x(vert2), st_y(vert2), st_z(vert2)],
+            array[st_x(vert3), st_y(vert3), st_z(vert3)],
+            array[st_x(vert4), st_y(vert4), st_z(vert4)],
+            array[st_x(vert5), st_y(vert5), st_z(vert5)],
+            array[st_x(vert6), st_y(vert6), st_z(vert6)],
+            array[st_x(vert7), st_y(vert7), st_z(vert7)]
+            from "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_faces}"
+            where ({sqltext_ijk}) and (iswall or isterr)
+            order by i, j, k, id
         """
-        wall_coord = self.execute(sqltext)
-        # sql_debug(self.connection)
-        # self.connection.commit()
+        walls, terrs = {}, {}
+        for row in self.execute(sqltext):
+            (walls if row[3] else terrs).setdefault((row[0], row[1], row[2]), []).append(row)
+        cells = [c for c in zip(i_all, j_all, k_all)
+                 if len(walls.get(c, [])) == 1 and len(terrs.get(c, [])) == 1]
+        if len(cells) < len(i_all):
+            warning('merge_walls_terrain: {} of {} cells do not hold exactly one wall and one terrain '
+                    'face; left unmerged', len(i_all) - len(cells), len(i_all))
+        if not cells:
+            return
+        i_all, j_all, k_all = [c[0] for c in cells], [c[1] for c in cells], [c[2] for c in cells]
+        sqltext_ijk = ' or '.join([f'(i = {i} and j = {j} and k = {k})' for i, j, k in cells])
+        wid = [walls[c][0][4] for c in cells]
+        wall_coord = [walls[c][0][5:12] for c in cells]
+        terr_coord = [terrs[c][0][5:12] for c in cells]
 
         # transform into numpy array
         verbose('transforming coordinates into numpy array')
@@ -2494,23 +2725,6 @@ class CctProcessing(BaseTask):
                 wall_coord_np[idx, 5, :] = wall_coord[idx][5]
             if wall_vert[idx] >= 6:
                 wall_coord_np[idx, 6, :] = wall_coord[idx][6]
-
-        # get all terrain coordinates
-        debug('selecting all terrain coordinates')
-        sqltext = f"""
-            select 
-            array[st_x(vert1), st_y(vert1), st_z(vert1)],  
-            array[st_x(vert2), st_y(vert2), st_z(vert2)], 
-            array[st_x(vert3), st_y(vert3), st_z(vert3)], 
-            array[st_x(vert4), st_y(vert4), st_z(vert4)], 
-            array[st_x(vert5), st_y(vert5), st_z(vert5)], 
-            array[st_x(vert6), st_y(vert6), st_z(vert6)], 
-            array[st_x(vert7), st_y(vert7), st_z(vert7)] 
-            from "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_faces}" 
-            where {sqltext_ijk} and isterr 
-            order by i, j, k
-        """
-        terr_coord = self.execute(sqltext)
         # sql_debug(self.connection)
         # self.connection.commit()
 
@@ -2560,7 +2774,7 @@ class CctProcessing(BaseTask):
 
         # delete original faces
         debug('deleting original faces')
-        sqltext = f'delete from "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_faces}" where {sqltext_ijk}'
+        sqltext = f'delete from "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_faces}" where ({sqltext_ijk}) and (iswall or isterr)'
         self.execute(sqltext)
         # sql_debug(self.connection)
         # self.connection.commit()
@@ -2579,7 +2793,7 @@ class CctProcessing(BaseTask):
                     st_setsrid(st_makepoint(%s, %s, %s), %s), 
                     st_setsrid(st_makepoint(%s, %s, %s), %s))
         """
-        self.self.executemany(sqltext, to_insert)
+        self.execute_batch(sqltext, to_insert)
         # sql_debug(self.connection)
         # self.connection.commit()
 
@@ -2621,13 +2835,7 @@ class CctProcessing(BaseTask):
         debug('update center of faces, just in case')
         sqltext = f"""
             update "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_faces}" set center = 
-            st_setsrid(st_makepoint(st_x(st_centroid(geom)), st_y(st_centroid(geom)), 
-                                   (st_z(vert1) + st_z(vert2) + 
-                                      case when st_npoints(geom) > 3 then st_z(st_pointn(st_exteriorring(geom),3)) else 0.0 end + 
-                                      case when st_npoints(geom) > 4 then st_z(st_pointn(st_exteriorring(geom),4)) else 0.0 end + 
-                                      case when st_npoints(geom) > 5 then st_z(st_pointn(st_exteriorring(geom),5)) else 0.0 end + 
-                                      case when st_npoints(geom) > 6 then st_z(st_pointn(st_exteriorring(geom),6)) else 0.0 end) / (st_npoints(geom)-1))
-                     , %s) 
+            {self._face_center_sql()} 
             where center is null
         """
         self.execute(sqltext, (self.cfg.srid_palm,))
@@ -2852,8 +3060,11 @@ class CctProcessing(BaseTask):
         # SELECT ALL rid
         debug('Finding all rids')
         sqltext_ijk = ' or '.join([f'(i = {i} and j = {j} and k = {k})' for i, j, k in zip(i_all, j_all, k_all)])
-        sqltext = f'select rid from "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_faces}" where isroof and ({sqltext_ijk}) order by i, j, k'
-        rid = self.execute(sqltext)
+        # one rid per cell, keyed by (i, j, k): a cell can hold two roof pieces
+        # or none (two walls), so a plain ordered list would not line up
+        sqltext = f'select i, j, k, min(rid) from "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_faces}" where isroof and ({sqltext_ijk}) group by i, j, k'
+        rid_cell = {(r[0], r[1], r[2]): r[3] for r in self.execute(sqltext)}
+        rid = [rid_cell.get(c) for c in zip(i_all, j_all, k_all)]
 
         # SELECT ALL Vertices
         debug('Selecting all coordinates')
@@ -2878,8 +3089,8 @@ class CctProcessing(BaseTask):
                 if count[ic] > 7:
                     warning(f'\tproblematic [i,j,k, idx], [{i_all[ic]}, {j_all[ic]}, {k_all[ic]}, {ic}]')
 
-            error('No go for merging')
-            exit(1)
+            raise RuntimeError('merge_walls_roofs: merged faces with more than 7 vertices, see the '
+                               'problematic cells listed above')
 
         verbose('Creating x verts')
         x_vert = [x[1] for x in verts]
@@ -2937,7 +3148,7 @@ class CctProcessing(BaseTask):
             #               i_all[idx], j_all[idx], k_all[idx],
             #               x_vert_np[idx], y_vert_np[idx], y_vert_np[idx], count[idx])
             or_all = self.merge_local_wall_roof(i_all[idx], j_all[idx], k_all[idx], x_vert_np[idx], y_vert_np[idx],
-                                           z_vert_np[idx], count[idx], self.cfg)
+                                           z_vert_np[idx], count[idx])
             order_all.append(or_all)
         order_all = np.asarray(order_all)
 
@@ -2984,7 +3195,7 @@ class CctProcessing(BaseTask):
                     )
         """
 
-        self.executemany(sqltext, to_insert)
+        self.execute_batch(sqltext, to_insert)
 
         # Create polygon
         debug('Updating 3d polygon')
@@ -3021,13 +3232,7 @@ class CctProcessing(BaseTask):
         debug('Updating center')
         sqltext = f"""
             update "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_faces}" set center = 
-            st_setsrid(st_makepoint(st_x(st_centroid(geom)), st_y(st_centroid(geom)), 
-                                   (st_z(vert1) + st_z(vert2) + 
-                                      case when st_npoints(geom) > 3 then st_z(st_pointn(st_exteriorring(geom),3)) else 0.0 end + 
-                                      case when st_npoints(geom) > 4 then st_z(st_pointn(st_exteriorring(geom),4)) else 0.0 end + 
-                                      case when st_npoints(geom) > 5 then st_z(st_pointn(st_exteriorring(geom),5)) else 0.0 end + 
-                                      case when st_npoints(geom) > 6 then st_z(st_pointn(st_exteriorring(geom),6)) else 0.0 end) / (st_npoints(geom) - 1))
-                     , %s) 
+            {self._face_center_sql()} 
             where center is null
         """
         self.execute(sqltext, (self.cfg.srid_palm,))
@@ -3457,12 +3662,7 @@ class CctProcessing(BaseTask):
         debug('Updating faces centers')
         sqltext = f"""
             update "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_faces}" set 
-            center = st_setsrid(st_makepoint(st_x(st_centroid(geom)), st_y(st_centroid(geom)), 
-                 (coalesce(st_z(st_pointn(st_exteriorring(geom)),1), 0.0) + coalesce(st_z(st_pointn(st_exteriorring(geom)),2), 0.0) + 
-                  coalesce(st_z(st_pointn(st_exteriorring(geom)),3), 0.0) + coalesce(st_z(st_pointn(st_exteriorring(geom)),4), 0.0) + 
-                  coalesce(st_z(st_pointn(st_exteriorring(geom)),5), 0.0) + coalesce(st_z(st_pointn(st_exteriorring(geom)),6), 0.0) + 
-                  coalesce(st_z(st_pointn(st_exteriorring(geom)),7), 0.0)) / st_npoints(geom))
-                     , %s)
+            center = {self._face_center_sql()}
         """
         self.execute(sqltext, (self.cfg.srid_palm,))
 
@@ -3671,7 +3871,7 @@ class CctProcessing(BaseTask):
                                         st_setsrid(st_makepoint(%s, %s, %s), %s) 
                                         ) 
             """
-            self.executemany(sqltext, to_insert)
+            self.execute_batch(sqltext, to_insert)
 
             # Create polygon
             debug('Updating 3d polygon')
@@ -3706,12 +3906,7 @@ class CctProcessing(BaseTask):
         debug('Updating faces centers')
         sqltext = f"""
             update "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_faces}" set 
-            center = st_setsrid(st_makepoint(st_x(st_centroid(geom)), st_y(st_centroid(geom)), 
-                 (coalesce(st_z(st_pointn(st_exteriorring(geom)),1), 0.0) + coalesce(st_z(st_pointn(st_exteriorring(geom)),2), 0.0) + 
-                  coalesce(st_z(st_pointn(st_exteriorring(geom)),3), 0.0) + coalesce(st_z(st_pointn(st_exteriorring(geom)),4), 0.0) + 
-                  coalesce(st_z(st_pointn(st_exteriorring(geom)),5), 0.0) + coalesce(st_z(st_pointn(st_exteriorring(geom)),6), 0.0) + 
-                  coalesce(st_z(st_pointn(st_exteriorring(geom)),7), 0.0) + coalesce(st_z(st_pointn(st_exteriorring(geom)),8), 0.0)) / st_npoints(geom))
-                     , %s)
+            center = {self._face_center_sql()}
         """
         self.execute(sqltext, (self.cfg.srid_palm,))
 
@@ -3973,6 +4168,7 @@ class CctProcessing(BaseTask):
 
         to_delete = []
         to_insert = []
+        unresolved = []
 
         for singular in singulars:
             ids, k, j, i, n_vert = singular[0], singular[1], singular[2], singular[3], singular[4]
@@ -4106,7 +4302,7 @@ class CctProcessing(BaseTask):
                         np.array([x_vert[ridx] - self.cfg.domain.origin_x, y_vert[ridx] - self.cfg.domain.origin_y, z_vert[ridx]])
 
                     # due to ordering RHS forcing
-                    norm_temp = normal_vector_triangle(p3, p2, p1)
+                    norm_temp = self.normal_vector_triangle(p3, p2, p1)
                     # print(idx)
                     # print(p1, p2, p3)
                     # print(norm_temp)
@@ -4233,10 +4429,17 @@ class CctProcessing(BaseTask):
                             elif sa_corner[cidx3] and f3:
                                 # corner 3 is SOLID, take
                                 ccidx = cidx3
+                            elif f1 or f2 or f3:
+                                # no solid corner next to the vertex (e.g. wall and roof
+                                # heights disagree at a coarse resolution): keep it on the
+                                # nearest existing corner and report the cell; the
+                                # continuity check and validate_cct show the spot
+                                ccidx = cidx1 if f1 else (cidx2 if f2 else cidx3)
+                                unresolved.append((i, j, k))
                             else:
-                                verbose('Some issues with corner, [{},{},{}], [{},{},{}]', ii[idx], jj[idx], kk[idx], i,
-                                        j, k)
-                                sys.exit(1)
+                                raise RuntimeError(
+                                    f'check_for_vertex_singularities: no corner for vertex '
+                                    f'[i,j,k]=[{ii[idx]},{jj[idx]},{kk[idx]}] of face cell [{i},{j},{k}]')
                             ii_new[ivert] = int(adj_corners[ccidx, 2])
                             jj_new[ivert] = int(adj_corners[ccidx, 1])
                             kk_new[ivert] = int(adj_corners[ccidx, 0])
@@ -4278,10 +4481,17 @@ class CctProcessing(BaseTask):
                             elif sa_corner[cidx3] and f3:
                                 # corner 3 is SOLID, take
                                 ccidx = cidx3
+                            elif f1 or f2 or f3:
+                                # no solid corner next to the vertex (e.g. wall and roof
+                                # heights disagree at a coarse resolution): keep it on the
+                                # nearest existing corner and report the cell; the
+                                # continuity check and validate_cct show the spot
+                                ccidx = cidx1 if f1 else (cidx2 if f2 else cidx3)
+                                unresolved.append((i, j, k))
                             else:
-                                verbose('Some issues with corner, [{},{},{}], [{},{},{}]', ii[idx], jj[idx], kk[idx], i,
-                                        j, k)
-                                sys.exit(1)
+                                raise RuntimeError(
+                                    f'check_for_vertex_singularities: no corner for vertex '
+                                    f'[i,j,k]=[{ii[idx]},{jj[idx]},{kk[idx]}] of face cell [{i},{j},{k}]')
                             ii_new[ivert] = int(adj_corners[ccidx, 2])
                             jj_new[ivert] = int(adj_corners[ccidx, 1])
                             kk_new[ivert] = int(adj_corners[ccidx, 0])
@@ -4474,7 +4684,7 @@ class CctProcessing(BaseTask):
                   '        ST_SetSRID(ST_MakePoint(%s, %s, %s), %s) ' \
                   '        )  '.format(self.cfg.domain.case_schema, self.cfg.tables.slanted_faces)
 
-        self.executemany(sqltext, to_insert)
+        self.execute_batch(sqltext, to_insert)
 
         debug('Updating 3d polygon')
         sqltext = 'UPDATE "{0}"."{1}" SET geom =  ' \
@@ -4490,6 +4700,11 @@ class CctProcessing(BaseTask):
                   '])), %s)) ' \
                   'WHERE geom IS NULL'.format(self.cfg.domain.case_schema, self.cfg.tables.slanted_faces)
         self.execute(sqltext, (self.cfg.srid_palm,))
+
+        if unresolved:
+            cells = sorted(set(unresolved))
+            warning('cct: {} singular vertex/vertices had no solid corner and kept their nearest corner, '
+                    'in cell(s) [i,j,k] {}{}', len(unresolved), cells[:10], ' ...' if len(cells) > 10 else '')
 
     def slanted_surface_init(self):
         """ initialize slanted surfaces """
@@ -4556,3 +4771,51 @@ class CctProcessing(BaseTask):
 
         # TODO: find duplicates, there are some points with the same x,y,z
         self.check_for_vertex_singularities()
+        self.unify_edge_vertices()
+
+        # normals and areas of the final face geometry (the singularity check
+        # rewrote faces), then drop degenerate faces before the vertex table is
+        # built, so it holds no vertex that only a removed face used. A
+        # degenerate face (fewer than 3 distinct vertices or no area, e.g. a wall
+        # piece of zero height on a coarse grid) carries no surface. n_vert still
+        # counts the closing vertex here.
+        self.normal_vector_trinagulation()
+        n_deg = self.fetchone(
+            f'with d as (delete from "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_faces}" '
+            f'where n_vert < 4 or area is null or area <= 0 returning 1) select count(*) from d')
+        if n_deg:
+            warning('cct: removed {} degenerate face(s) (fewer than 3 vertices or zero area)', n_deg)
+
+        self.create_vertices_indexes()
+
+        # additional indices
+        self.execute(f"""
+            create index if not exists slanted_faces_rid_idx on "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_faces}" (rid);
+            create index if not exists slanted_faces_lid_idx on "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_faces}" (lid);
+            create index if not exists slanted_faces_wid_idx on "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_faces}" (wid)
+        """)
+
+        if self.cfg.slanted_pars.do_vtk:
+            create_slanted_vtk(self.db, self.cfg)
+
+        # final touch: remove the closing vertex (repeats the first one)
+        debug('removing extra vertex')
+        self.execute(f'update "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_faces}" set n_vert = n_vert - 1')
+        for iv in range(1, 8):
+            verbose(f'removing extra vertices, {iv}')
+            self.execute(f'update "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_faces}" '
+                         f'set vert{iv}i = null where n_vert < {iv}')
+
+        self.execute(f'comment on table "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_faces}" '
+                     f"is '{self.CCT_DONE_MARK}'")
+
+    # The face normals and the vertex index table are computed by the driver
+    # class (CCTDriverGen, which inherits this class and overrides both); the
+    # standalone cct_processing task borrows its implementation.
+    def normal_vector_trinagulation(self):
+        from .netcdf_generator import CCTDriverGen
+        return CCTDriverGen.normal_vector_trinagulation(self)
+
+    def create_vertices_indexes(self):
+        from .netcdf_generator import CCTDriverGen
+        return CCTDriverGen.create_vertices_indexes(self)

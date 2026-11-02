@@ -509,6 +509,15 @@ class InitializeDomainTask(BaseTask):
 
         # 7. check for 3d building data (extras)
         has_3d = self.cfg.tables.extras_shp in self.cfg.vtabs and self.cfg.tables.extras in self.cfg.rtabs
+
+        # cut-cell topography works on simplified building outlines only: the
+        # landcover is rebuilt from them, so LOD2 walls/roofs and 3-D structures
+        # cannot be carried along. Switch both off before anything uses them.
+        if self.cfg.do_cct and (self.cfg.lod2 or has_3d):
+            warning('do_cct: cut-cell topography runs without LOD2 and 3-D buildings; '
+                    'ignoring walls/roofs parametrisation and extras')
+            self.cfg.update_setting('lod2', False)
+            has_3d = False
         self.cfg.update_setting('has_3d_buildings', has_3d)
 
         if not has_3d:
@@ -585,8 +594,105 @@ class InitializeDomainTask(BaseTask):
 
         debug(f'Start at {npoints}')
 
-        for i in range(1, 6):
+        # each pass cuts the remaining corners back by about one densification
+        # step (slanted_pars.edge_segment_length), so more passes round the
+        # outlines more
+        for i in range(1, int(self.cfg.slanted_pars.get('corner_passes', 5)) + 1):
+            # densify, drop vertices whose corner angle is outside the accepted
+            # range, and rebuild the rings; multipolygons and collections left by
+            # an earlier ST_MakeValid pass are split into single polygons first
+            # (ST_DumpRings accepts single polygons only) and the result is
+            # dumped back to polygons, so every pass starts from POLYGON input
             sqltext = f"""
+            drop table if exists "{self.cfg.domain.case_schema}".build_edge_correction;
+            create table "{self.cfg.domain.case_schema}".build_edge_correction as
+            with densified_building AS (
+                SELECT
+                    ST_Segmentize(d.geom, {self.cfg.slanted_pars.edge_segment_length}) AS geom,
+                    l.lid,
+                    COALESCE(d.path[1], 1) AS part_idx
+                FROM "{self.cfg.domain.case_schema}"."{self.cfg.tables.build_new}" AS l
+                CROSS JOIN LATERAL ST_Dump(ST_CollectionExtract(ST_MakeValid(l.geom), 3)) AS d
+            ),
+            building_dumped_rings AS (
+                SELECT b.lid, b.part_idx, r.geom AS ring_geom,
+                       r.path[1] AS ring_idx -- ST_DumpRings: 0 = outer ring, 1+ = holes
+                FROM densified_building b
+                CROSS JOIN LATERAL ST_DumpRings(b.geom) AS r
+            ),
+            ring_points AS (
+                SELECT bdr.lid, bdr.part_idx, bdr.ring_idx, p.geom AS point_geom,
+                       p.path[2] AS point_idx -- index of the point within its ring
+                FROM building_dumped_rings bdr
+                CROSS JOIN LATERAL ST_DumpPoints(bdr.ring_geom) AS p
+            ),
+            lag_lead_points AS (
+                SELECT lid, part_idx, ring_idx, point_geom AS p2_geom, point_idx AS p2_idx,
+                       LAG(point_geom, 1)  OVER (PARTITION BY lid, part_idx, ring_idx ORDER BY point_idx) AS p1_geom,
+                       LEAD(point_geom, 1) OVER (PARTITION BY lid, part_idx, ring_idx ORDER BY point_idx) AS p3_geom
+                FROM ring_points
+            ),
+            calc_stat as (
+                SELECT lid, part_idx, ring_idx, p2_idx as point_idx, p2_geom as point_geom,
+                       DEGREES(ST_Angle(p1_geom, p2_geom, p3_geom)) AS angle_at_p2_degrees,
+                       ST_Distance(p1_geom, p3_geom) AS distance_p1_p3
+                FROM lag_lead_points
+                WHERE p1_geom IS NOT NULL AND p3_geom IS NOT NULL
+            ),
+            filter_points as (
+                select *
+                from calc_stat
+                where angle_at_p2_degrees between {self.cfg.slanted_pars.edge_angle_min} and {self.cfg.slanted_pars.edge_angle_max}
+                    and distance_p1_p3 > {self.cfg.slanted_pars.edge_2_edge_distance}
+            ),
+            reconstructed_rings AS (
+                SELECT lid, part_idx, ring_idx, ST_MakeLine(point_geom ORDER BY point_idx) AS ring_line
+                FROM filter_points
+                GROUP BY lid, part_idx, ring_idx
+            ),
+            closed_reconstructed_rings AS (
+                SELECT lid, part_idx, ring_idx, closed_linestring
+                FROM (
+                    SELECT lid, part_idx, ring_idx,
+                           CASE WHEN ST_Equals(ST_StartPoint(ring_line), ST_EndPoint(ring_line)) THEN ring_line
+                                ELSE ST_AddPoint(ring_line, ST_StartPoint(ring_line)) END AS closed_linestring
+                    FROM reconstructed_rings
+                ) c
+                WHERE ST_NPoints(closed_linestring) >= 4
+            ),
+            building_rings_separated AS (
+                SELECT lid, part_idx,
+                       -- not MAX(): PostgreSQL 18 has max(bytea), so max(geometry) is ambiguous
+                       (ARRAY_AGG(closed_linestring) FILTER (WHERE ring_idx = 0))[1] AS outer_ring_geom,
+                       ARRAY_AGG(CASE WHEN ring_idx <> 0 THEN closed_linestring END ORDER BY ring_idx)
+                           FILTER (WHERE ring_idx <> 0) AS inner_rings_array
+                FROM closed_reconstructed_rings
+                GROUP BY lid, part_idx
+            ),
+            final_polygons AS (
+                SELECT lid, part_idx,
+                       -- ST_MakeValid may return a MULTIPOLYGON / GEOMETRYCOLLECTION when it
+                       -- repairs a self-intersection: keep only the polygonal parts
+                       ST_CollectionExtract(ST_MakeValid(
+                           CASE WHEN inner_rings_array IS NOT NULL
+                                THEN ST_MakePolygon(outer_ring_geom, inner_rings_array)
+                                ELSE ST_MakePolygon(outer_ring_geom) END), 3) AS geom
+                FROM building_rings_separated
+                WHERE outer_ring_geom IS NOT NULL
+                    AND ST_NPoints(outer_ring_geom) >= 4
+                    AND ST_IsClosed(outer_ring_geom)
+                    AND ST_IsSimple(outer_ring_geom)
+            )
+            SELECT fp.lid, ST_ForcePolygonCCW(d.geom) AS geom
+            FROM final_polygons fp
+            CROSS JOIN LATERAL ST_Dump(fp.geom) AS d
+            ORDER BY fp.lid;
+            """
+            self.execute(sqltext, fetch=False)
+
+            # the previous single-polygon version of this pass, kept for reference
+            # (not executed)
+            sqltext_previous = f"""
             drop table if exists "{self.cfg.domain.case_schema}".build_edge_correction;
             create table "{self.cfg.domain.case_schema}".build_edge_correction as 
             with densified_building AS (
@@ -686,7 +792,7 @@ class InitializeDomainTask(BaseTask):
             building_rings_separated AS (
                 SELECT
                     lid,
-                    MAX(CASE WHEN ring_idx = 0 THEN closed_linestring END) AS outer_ring_geom,
+                    (ARRAY_AGG(closed_linestring) FILTER (WHERE ring_idx = 0))[1] AS outer_ring_geom,
                     ARRAY_AGG(CASE WHEN ring_idx <> 0 THEN closed_linestring END ORDER BY ring_idx) FILTER (WHERE ring_idx <> 0) AS inner_rings_array
                 FROM
                     corrected_winding_rings
@@ -707,7 +813,6 @@ class InitializeDomainTask(BaseTask):
             ORDER BY
                 brs.lid;
             """
-            self.execute(sqltext, fetch=False)
 
             result = self.execute(
                 f"""
@@ -720,13 +825,13 @@ class InitializeDomainTask(BaseTask):
             npoints = result[0][0] if result else 0
             debug(f'i: {i}: {npoints}')
 
-        # Update temp table to schema table
-        sqltext = f"""
-        drop table if exists "{self.cfg.domain.case_schema}"."{self.cfg.tables.build_new}";
-        create table "{self.cfg.domain.case_schema}"."{self.cfg.tables.build_new}" as
-        select * from "{self.cfg.domain.case_schema}".build_edge_correction;
-        """
-        self.execute(sqltext)
+            # the next pass works on the corrected outlines
+            sqltext = f"""
+            drop table if exists "{self.cfg.domain.case_schema}"."{self.cfg.tables.build_new}";
+            create table "{self.cfg.domain.case_schema}"."{self.cfg.tables.build_new}" as
+            select * from "{self.cfg.domain.case_schema}".build_edge_correction;
+            """
+            self.execute(sqltext)
 
     def preprocess_building_landcover(self):
         """
@@ -751,7 +856,7 @@ class InitializeDomainTask(BaseTask):
 
         sql_union = f"""
             create table "{self.cfg.domain.case_schema}"."{self.cfg.tables.land_build}" as 
-            select st_simplify((st_dump(st_union(st_buffer(geom, 0.0000001)))).geom, %s) as geom 
+            select st_simplify((st_dump(st_union(st_buffer(geom, 0.00001)))).geom, %s) as geom 
             from "{self.cfg.domain.case_schema}"."{self.cfg.tables.landcover}"
             where type between %s and %s
         """
@@ -830,9 +935,15 @@ class InitializeDomainTask(BaseTask):
         # 6. create finalized building footprints (build_new)
         self.execute(f'drop table if exists "{self.cfg.domain.case_schema}"."{self.cfg.tables.build_new}" cascade')
 
+        # touching outlines are merged by growing them 1 mm before the union; the
+        # union is shrunk back by the same 1 mm (morphological closing, mitred
+        # corners) so outlines keep their position. Without the shrink every
+        # outline grew 1 mm, and an outline on a cell boundary left a 1 mm roof
+        # sliver in the neighbouring column, over cells the stair-step grid
+        # treats as open ground.
         sql_finalize_build = f"""
-            create table "{self.cfg.domain.case_schema}"."{self.cfg.tables.build_new}" as 
-            select st_forcerhr((st_dump(st_union(st_buffer(geom, 0.001)))).geom) as geom from (
+            create table "{self.cfg.domain.case_schema}"."{self.cfg.tables.build_new}" as
+            select st_forcerhr((st_dump(st_buffer(st_union(st_buffer(geom, 0.001, 'join=mitre')), -0.001, 'join=mitre'))).geom) as geom from (
                 select geom from "{self.cfg.domain.case_schema}"."{self.cfg.tables.land_build}"
                 union all 
                 select geom from "{self.cfg.domain.case_schema}"."{build_conv}"
@@ -857,15 +968,23 @@ class InitializeDomainTask(BaseTask):
         lc_dif = 'landcover_dif'
 
         self.execute(f'drop table if exists "{self.cfg.domain.case_schema}"."{lc_intersect}" cascade')
+        # each merged outline keeps the building type of the original building
+        # polygon it overlaps most (906 only when it overlaps none); the type
+        # is what PALM uses for the wall and roof properties without LOD2 data
+        tr = self.cfg.type_range
         sql_lc_int = f"""
             create table "{self.cfg.domain.case_schema}"."{lc_intersect}" as 
-            select ll.lid as lid, 906 as type, (st_dump(st_union(st_buffer(ll.geom, 0.0000001)))).geom as geom 
+            select ll.lid as lid, ll.type as type, (st_dump(st_union(st_buffer(ll.geom, 0.0000001)))).geom as geom 
             from (
-                select lb.lid, (st_dump(st_intersection(l.geom, lb.geom))).geom as geom 
+                select lb.lid, coalesce(bt.type, 906) as type, (st_dump(st_intersection(l.geom, lb.geom))).geom as geom 
                 from "{self.cfg.domain.case_schema}"."{self.cfg.tables.landcover}" as l, 
                      "{self.cfg.domain.case_schema}"."{self.cfg.tables.build_new}" as lb 
+                left join lateral (
+                    select lo.type from "{self.cfg.domain.case_schema}"."{self.cfg.tables.landcover}" as lo
+                    where lo.type between {tr.building_min} and {tr.building_max} and st_intersects(lo.geom, lb.geom)
+                    order by st_area(st_intersection(lo.geom, lb.geom)) desc limit 1) as bt on true
                 where st_intersects(l.geom, lb.geom)
-            ) as ll group by ll.lid
+            ) as ll group by ll.lid, ll.type
         """
         self.execute(sql_lc_int)
         self.execute(
@@ -917,11 +1036,26 @@ class InitializeDomainTask(BaseTask):
         # below could never be created (and palm_fill_building_holes later
         # crashed on ADD PRIMARY KEY). grid.lid is re-derived from this table in
         # connect_landcover_grid(), so the original lid values are not needed.
+        #
+        # The difference and intersection with the merged outlines leave
+        # zero-width spikes along shared edges (the ring runs out and straight
+        # back). A spike on a building outline makes the outer wall line pass
+        # a cell several times; the cell cannot be split along it and the wall
+        # there is lost, leaving a seam in the cut-cell surface. A 1 mm mitred
+        # opening and closing of every polygon removes spikes and slits thinner
+        # than 2 mm and keeps the rest of the outline in place.
         sql_merge = f"""
             create table "{self.cfg.domain.case_schema}"."{self.cfg.tables.landcover}" as
-            select type, geom from "{self.cfg.domain.case_schema}"."{lc_dif}"
-            union all
-            select type, geom from "{self.cfg.domain.case_schema}"."{lc_intersect}"
+            select type, geom from (
+                select type, (st_dump(st_buffer(st_buffer(st_buffer(geom, -0.001, 'join=mitre'),
+                                                          0.002, 'join=mitre'), -0.001, 'join=mitre'))).geom as geom
+                from (
+                    select type, geom from "{self.cfg.domain.case_schema}"."{lc_dif}"
+                    union all
+                    select type, geom from "{self.cfg.domain.case_schema}"."{lc_intersect}"
+                ) as merged
+            ) as cleaned
+            where st_geometrytype(geom) = 'ST_Polygon' and st_area(geom) > 0
         """
         self.execute(sql_merge)
 
@@ -932,6 +1066,10 @@ class InitializeDomainTask(BaseTask):
             f'create index if not exists {self.cfg.tables.landcover}_geom_idx on "{self.cfg.domain.case_schema}"."{self.cfg.tables.landcover}" using gist(geom)')
 
         self.set_table_owner(self.cfg.domain.case_schema, self.cfg.tables.landcover)
+
+        # the cut-cell path always fills small courtyards enclosed by the
+        # merged outlines, whatever cortyard_fill.apply_polygon says
+        self.fill_cortyard_polygon(force=True)
         progress('building geometry preprocessing complete')
 
     def create_and_fill_case_schema(self):
@@ -1341,13 +1479,15 @@ class InitializeDomainTask(BaseTask):
 
         progress('courtyard filling complete')
 
-    def fill_cortyard_polygon(self):
+    def fill_cortyard_polygon(self, force=False):
         """
         function to fill courtyards based on polygon area search.
         iteratively replaces small polygons completely surrounded by buildings
-        with the type of one of their neighbors.
+        with the type of one of their neighbors. Runs when
+        cortyard_fill.apply_polygon is set, or always with force=True (the
+        cut-cell landcover rebuild).
         """
-        if not self.cfg.cortyard_fill.apply_polygon:
+        if not (force or self.cfg.cortyard_fill.apply_polygon):
             return
         progress('filling courtyards using polygon area criteria')
 
@@ -1446,14 +1586,32 @@ class InitializeDomainTask(BaseTask):
         if not self.cfg.crop_small_buildings:
             return
 
-        debug('removing buildings smaller than area threshold')
+        # the area test applies to whole buildings: polygons that touch or
+        # overlap are merged into one cluster first, so a large building drawn
+        # as several small parts is kept and only isolated small clusters go
+        debug('removing building clusters smaller than area threshold')
         area_limit = self.cfg.small_buildings_area * (self.cfg.domain.dx ** 2)
+        schema, landcover = self.cfg.domain.case_schema, self.cfg.tables.landcover
+        tr = self.cfg.type_range
         sql_small = f"""
-            update "{self.cfg.domain.case_schema}"."{self.cfg.tables.landcover}" as l 
-            set type = 202 
-            where type >= %s and st_area(geom) < %s
+            with clusters as (
+                select (st_dump(st_union(geom))).geom as geom
+                from "{schema}"."{landcover}"
+                where type between {tr.building_min} and {tr.building_max}
+            ),
+            small as (
+                select distinct l.lid
+                from clusters c
+                join "{schema}"."{landcover}" l
+                  on st_intersects(l.geom, c.geom) and l.type between {tr.building_min} and {tr.building_max}
+                where st_area(c.geom) < %s
+            )
+            update "{schema}"."{landcover}" as l
+            set type = 202
+            from small s
+            where l.lid = s.lid
         """
-        self.execute(sql_small, (self.cfg.type_range.building_min, area_limit))
+        self.execute(sql_small, (area_limit,))
 
     def _fill_default_building_heights(self):
         """ fill buildings grid where height is missing (null or 0) with values

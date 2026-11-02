@@ -144,6 +144,7 @@ slanted_pars:
     edge_angle_min: 105.0
     edge_angle_max: 245.0
     edge_2_edge_distance: 1.7
+    corner_passes: 5             # passes of the building corner smoothing (each cuts corners by ~edge_segment_length)
     
     
 fill_missing_holes: True

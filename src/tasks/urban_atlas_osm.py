@@ -142,6 +142,10 @@ class UrbanAtlasOSM(BaseTask):
         # UrbanAtlas path carries the code column for the mt mapping instead
         attr = 'type' if self.cfg.landcover_has_types else 'code'
 
+        # spatial index on the imported landcover
+        self.execute(f'create index if not exists {self.cfg.tables.im_landcover_or}_geom_idx '
+                     f'on "{self.cfg.input_schema}"."{self.cfg.tables.im_landcover_or}" using gist(geom)')
+
         # clip landcover by the envelope and split large polygons along the fishnet
         sql_clip = f"""
             drop table if exists "{self.cfg.input_schema}"."{self.cfg.tables.im_landcover}" cascade;

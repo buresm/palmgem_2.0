@@ -38,10 +38,10 @@ Two schemas hold all state:
 | `lad` | `LadGenerator` | `case_schema` trees + grid | `trees_grid` (`lad_*`/`bad_*` columns) | `initialize_domain` |
 | `lai` | `LaiGenerator` | `case_schema` grid + LAI/canopy rasters | `lai`/`canopy_height` columns on grid | `initialize_domain` (+ imported LAI/canopy rasters) |
 | `prepare_slurb` | `PrepareSlurbInputs` | `input_schema` landcover (incl. building-type polygons) + buildings raster | `input_schema` centerline / `building_area` / street-segment tables | `gis_import` |
-| `cct_processing` | `CctProcessing` | `case_schema` grid/landcover/buildings | slanted faces/vertices tables | `initialize_domain` (needs `do_cct: True`) |
+| `cct_processing` | `CctProcessing` | `case_schema` grid/landcover/buildings | slanted faces/vertices tables (geometry only; optional, for staged runs) | `initialize_domain` (needs `do_cct: True`) |
 | `static_driver` | `StaticDriverGen` | `case_schema.grid` + parameter tables in config | `output/<case>_static.nc` | `initialize_domain` (+ `lad`/`lai` if you want trees) |
 | `slurb_driver` | `SlurbDriverGen` | `case_schema` grid + SLURB inputs | `output/<case>_slurb.nc` | `prepare_slurb`, then `initialize_domain` to copy its tables into the case schema (needs `slurb: True`) |
-| `cct_driver` | `CCTDriverGen` | slanted-face tables | slanted NetCDF | `cct_processing` |
+| `cct_driver` | `CCTDriverGen` | `case_schema` grid + slanted-face tables | `output/<case>_static.nc`: the static driver plus the `cct_*` mesh; use it **instead of** `static_driver`. Builds the geometry itself unless `cct_processing` already did | `initialize_domain` (`do_cct: True`; + `lad` for trees). See [cut_cell_topo.md](cut_cell_topo.md) |
 | `qa_report` | `QaReportTask` | driver NetCDFs + `case_schema` tables | `output/<case>_qa_report.html` (variable maps/histograms, PIDS findings, landcover/building stats, task timings) | the driver task(s) whose output it should analyse |
 | `pids_check` | `PidsCheckTask` | driver NetCDFs | log findings (PIDS compliance) | the driver task(s); also runs automatically after each driver when `pids.enabled` |
 | `qgis_export` | `QgisExportTask` | `case_schema` tables | `output/<case>.gpkg` styled GeoPackage snapshot (QGIS-ready, per-layer default styles embedded) | `initialize_domain` (any subset of tables works) |

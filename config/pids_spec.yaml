@@ -35,8 +35,36 @@ static:
     # cells, no zero-height buildings, soil under vegetation/pavement
     consistency_checks: static
     coordinate_variables: [x, y, z, zlad, zsoil]
-    exempt_variables: [crs, E_UTM, N_UTM, lon, lat]
+    # the cut-cell topography mesh arrays (cct_driver) have no missing values
+    # by design; their geometry is checked by src/utils/cct_validation.py,
+    # which runs whenever the file has a cct_num_faces dimension
+    exempt_variables: [crs, E_UTM, N_UTM, lon, lat,
+                       cct_max_num_vertices_per_face, cct_dim_vertex_coords, cct_dim_vertex_shifts,
+                       cct_vertices, cct_vertex_coords, cct_vertex_shifts, cct_vertices_per_face,
+                       cct_face_center, cct_3d_grid_indices, cct_offsets, cct_face_normal_vector,
+                       cct_face_area, cct_num_vertices_per_face, cct_surface_type_classification]
     variable_rules:
+        cct_vertices:
+            dims: [dim_3d, cct_num_vert]
+            dtype_kind: f
+        cct_vertex_coords:
+            dims: [cct_dim_vertex_coords, cct_num_vert]
+            dtype_kind: i
+        cct_vertices_per_face:
+            dims: [cct_max_num_vertices_per_face, cct_num_faces]
+            dtype_kind: i
+        cct_face_normal_vector:
+            dims: [dim_3d, cct_num_faces]
+            dtype_kind: f
+        cct_face_area:
+            dims: [cct_num_faces]
+            dtype_kind: f
+        cct_3d_grid_indices:
+            dims: [dim_3d, cct_num_faces]
+            dtype_kind: i
+        cct_surface_type_classification:
+            dims: [cct_num_faces]
+            dtype_kind: i
         zt:
             dims: [y, x]
             dtype_kind: f

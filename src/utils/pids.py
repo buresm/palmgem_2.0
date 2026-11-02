@@ -16,6 +16,7 @@ import numpy as np
 import yaml
 
 from src.logger import progress, debug, warning, error
+from src.utils.cct_validation import has_cct, check_cct_geometry
 
 Finding = namedtuple('Finding', ['level', 'message'])
 
@@ -134,6 +135,15 @@ def validate_dataset(ds, spec_section):
         findings.extend(check_static_consistency(ds))
     elif rule_set == 'slurb':
         findings.extend(check_slurb_consistency(ds))
+
+    # 7. cut-cell topography mesh (static drivers written by cct_driver)
+    if has_cct(ds):
+        cct_findings, cct_stats = check_cct_geometry(ds)
+        findings.extend(Finding(level, msg) for level, msg in cct_findings)
+        if cct_stats:
+            progress('CCT mesh: {faces} faces ({faces_land} land, {faces_wall} wall, {faces_roof} roof), '
+                     '{vertices} vertices; columns covered once {columns_covered_once:.1%}, '
+                     'projected area / domain {projected_area_ratio:.3f}', **cct_stats)
 
     return findings
 

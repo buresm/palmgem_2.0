@@ -178,7 +178,7 @@
 | **force_building_boundary_dist** | 3 | Distance in grid cells for **force_building_boundary**; real distance = value × dx |
 | **crop_small_buildings** | False | Crop small buildings, especially in case of slanted faces |
 | **small_buildings_area** | 20 | Area in grid points for cropped building if enables |
-| **do_cct** | False | Cut-cell topography: slanted terrain, wall and roof faces (`cct_processing`, `cct_driver`). Needs a building-height raster. Experimental |
+| **do_cct** | False | Cut-cell topography: slanted terrain, wall and roof faces, written into the static driver by `cct_driver` (run it instead of `static_driver`). Needs a DEM and a building-height raster; switches LOD2 and 3-D buildings off. Experimental, see [cut_cell_topo.md](cut_cell_topo.md) |
 | **slanted_pars.max_dist** | 2.0 | m; (CCT) building polygons closer than this are merged |
 | **slanted_pars.simplify_dist** | 3.0 | m; (CCT) tolerance for simplifying the merged building outlines |
 | **slanted_pars.min_seg** | 2.0 | m; (CCT) outline segments shorter than twice this are corrected |
@@ -186,6 +186,7 @@
 | **slanted_pars.edge_angle_min** | 105.0 | deg; (CCT) outline vertices with an angle between edge_angle_min and edge_angle_max are candidates for the edge correction |
 | **slanted_pars.edge_angle_max** | 245.0 | deg; (CCT) upper limit, see **slanted_pars.edge_angle_min** |
 | **slanted_pars.edge_2_edge_distance** | 1.7 | m; (CCT) a vertex is corrected only when its two neighbours are farther apart than this |
+| **slanted_pars.corner_passes** | 5 | (CCT) passes of the building corner smoothing; each pass cuts the remaining corners back by about **slanted_pars.edge_segment_length** (a 10 × 10 m building keeps ~98 % of its footprint after 1 pass, ~71 % after 5) |
 | **slanted_pars.dist2edge** | 3.0 | m; (CCT) terrain points within twice this distance of a wall are height-corrected |
 | **slanted_pars.dist2edge_filter** | 0.6 | m; (CCT) search distance when correcting terrain heights inside buildings |
 | **slanted_pars.roofs_dist2edge** | 2.0 | m; (CCT) roof points within this distance of the roof edge are set to floor(height) |

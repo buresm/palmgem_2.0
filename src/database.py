@@ -15,6 +15,22 @@ def _sql_trace(query):
     return ' '.join(str(query).split())
 
 
+# numpy scalars as query parameters. psycopg2 quotes a float subclass with
+# repr(), which numpy 2 turned into 'np.float64(30.0)', and it cannot adapt
+# np.float32 / np.int32 at all; pass them on as plain Python numbers.
+def _register_numpy_adapters():
+    import numpy as np
+    from psycopg2.extensions import register_adapter, adapt, AsIs
+    for t in (np.float64, np.float32, np.float16):
+        register_adapter(t, lambda v: adapt(float(v)))   # plain float: NaN/inf handled by psycopg2
+    for t in (np.int64, np.int32, np.int16, np.int8, np.uint64, np.uint32, np.uint16, np.uint8):
+        register_adapter(t, lambda v: AsIs(int(v)))
+    register_adapter(np.bool_, lambda v: AsIs('true' if v else 'false'))
+
+
+_register_numpy_adapters()
+
+
 class Database:
     """
     Core Database handler for PostGIS operations.
