@@ -47,6 +47,12 @@ What it needs and what it changes:
 - the terrain next to walls is raised within `slanted_pars.dist2edge` and roof edges are lowered to
   `floor(height)` within `slanted_pars.roofs_dist2edge`, so the result does not reproduce the input
   areas exactly;
+- the rebuilt landcover polygons are cleaned of zero-width spikes and slits (a 1 mm opening and
+  closing); a spike on a building outline would make the wall line cross a cell several times and
+  the wall there would be lost;
+- a vertex that ends up on no grid edge (a fold of the terrain inside a cell face) is moved onto the
+  nearest edge, keeping the coordinate furthest from a grid line; it then matches its integer
+  description;
 - the stair-step grid follows the cut surface: before the static variables are written, the top
   land/roof face of every column sets its solid top (`zt` + `buildings_2d`), so that face lies in the
   topmost solid cell or the first air cell. Roof-edge columns the building covers only partly become
@@ -114,6 +120,8 @@ ParaView.
 
 - `tests/unit/test_cct_validation.py`, `tests/unit/test_cct_viewer.py`: the validator and the viewer on a
   hand-built mesh, one injected defect per test.
+- `tests/unit/test_cct_merge.py`: the wall/terrain merge of a wall-foot cell next to plain walls and
+  next to merged cells.
 - `tests/integration/test_cct_pipeline.py`: a synthetic 10 × 10 × 10 m building on flat ground
   (`tests/utils/cct_box_case.py`, about 20 s) must give a watertight mesh with no finding, the roof at the
   building height and the building ids of `building_id`; a driver-only rerun must reuse the geometry. A
@@ -125,9 +133,12 @@ ParaView.
 - Coarse grids (about 5 m and more): outlines and raster heights that do not fit the grid lead to
   singular vertices (kept on their nearest corner and reported), wall/terrain cells that cannot be
   merged (left unmerged and reported) and validation errors.
-- At the foot of diagonal walls the wall/terrain merge can produce a malformed face (vertices
-  crossing); the column is then not covered exactly once and the validation reports open edges there
-  (about 0.1 % of the columns in the Prague example).
+- Where a wall stands on sloping ground, the cell holding the wall foot merges terrain and wall into
+  one face that rises to the wall top. Next to a cell that keeps a plain vertical wall the merged face
+  climbs the wall at the shared cell face instead, but only while the face stays within 6 vertices;
+  beyond that, and along diagonal walls where the terrain level changes from cell to cell, the two
+  faces can still miss each other. The validation reports these as open edges (a few spots in the
+  Prague example, well under 0.1 % of the faces).
 - A few geometry fix-ups rely on heuristics rather than exact construction (terrain raised next to
   walls, roof edges lowered, corner correction).
 - Polygon splitting for mixed-height walls (z1 ≠ z2) and for faces with several top points is incomplete.

@@ -2631,30 +2631,6 @@ class CctProcessing(BaseTask):
         """ merging roof edges with walls """
         progress('merging grid faces of terrain and walls')
 
-        # A flat terrain face lying exactly on a grid level z = (k-1)*dz is
-        # filed as the floor of cell k (see initialize_slanted_faces). When a
-        # wall starts on that level in the same column, cell k would hold the
-        # terrain and the lowest wall piece, and the merge below would turn
-        # them into one face sloping from the floor to the wall top. A
-        # neighbour whose terrain lies a little lower keeps a vertical wall in
-        # cell k, so the two faces no longer meet on their common cell face and
-        # the surface opens there. Such a terrain face is filed as the top of
-        # cell k-1 instead (when that cell is empty): the wall in cell k then
-        # stays vertical like its neighbours.
-        dz = self.cfg.domain.dz
-        moved = self.execute(f"""
-            update "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_faces}" as t set k = t.k - 1
-            where t.isterr and t.k > 1
-              and (select bool_and(abs(st_z(p.geom) - (t.k - 1) * {dz}) < 1e-6) from st_dumppoints(t.geom) as p)
-              and exists (select 1 from "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_faces}" as w
-                          where w.iswall and w.i = t.i and w.j = t.j and w.k = t.k)
-              and not exists (select 1 from "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_faces}" as o
-                              where o.i = t.i and o.j = t.j and o.k = t.k - 1)
-            returning t.id
-        """)
-        if moved:
-            verbose('{} flat terrain face(s) under a wall moved to the cell below', len(moved))
-
         debug('finding duplicates')
         # find all aggregated faces, create new table with aggregated ones
         sqltext = f"""
@@ -2667,6 +2643,8 @@ class CctProcessing(BaseTask):
         duplicits = self.execute(sqltext)
         # sql_debug(self.connection)
         # self.connection.commit()
+        if not duplicits:
+            return
 
         i_all = [x[0] for x in duplicits]
         j_all = [x[1] for x in duplicits]
@@ -2748,6 +2726,11 @@ class CctProcessing(BaseTask):
 
         del terr_coord
         del wall_coord
+
+        # cells holding a terrain face, before any merge (merge_local_wall_terrain
+        # looks at the neighbours of a wall foot)
+        self._terrain_cells = {tuple(r) for r in self.execute(
+            f'select i, j, k from "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_faces}" where isterr')}
 
         # join them and find correct coordinates
         debug('merging duplicates')
@@ -3526,6 +3509,59 @@ class CctProcessing(BaseTask):
         terr_coord = terr_coord[:terr_vert, :]
 
         wall_coord_t = wall_coord[wall_coord[:, 2] >= np.max(wall_coord[:, 2])]
+
+        # The merge below raises the terrain points under the wall top (the wall
+        # feet) to the wall top, so the merged face slopes up to the wall. Its
+        # neighbour across a cell face must then end at the same raised point,
+        # which holds when the neighbour merges terrain and wall in this cell
+        # too. When the neighbour has no terrain face in this cell it shows the
+        # wall there as a vertical face from the cell floor up; a foot on the
+        # floor is then kept and the face climbs the wall at that point
+        # (... P -> T ...), otherwise the two faces miss each other on their
+        # common cell face and the surface opens there. Both sides decide by
+        # the same rule, so they agree. A face has room for 6 vertices.
+        d = self.cfg.domain
+        n_t = len(terr_coord)
+        floor_z = (k - 1) * d.dz
+        tops = {}
+        for tri, tr in enumerate(terr_coord):
+            for tw in wall_coord_t:
+                if tw[0] == tr[0] and tw[1] == tr[1] and tw[2] > tr[2]:
+                    tops[tri] = tw
+                    break
+
+        def keep_foot(p):
+            if abs(float(p[2]) - floor_z) > 1e-6:
+                return False
+            lx = (float(p[0]) - d.origin_x) / d.dx - i
+            ly = (float(p[1]) - d.origin_y) / d.dy - j
+            on_x = [s for s, v in ((-1, lx), (1, lx - 1.0)) if abs(v) < 1e-6]
+            on_y = [s for s, v in ((-1, ly), (1, ly - 1.0)) if abs(v) < 1e-6]
+            if len(on_x) + len(on_y) != 1:               # inside the cell or on a vertical edge
+                return False
+            nb = (i + on_x[0], j, k) if on_x else (i, j + on_y[0], k)
+            return nb not in self._terrain_cells
+
+        if len(tops) == 2 and getattr(self, '_terrain_cells', None) is not None:
+            a, b = sorted(tops)
+            if b == a + 1 or (a == 0 and b == n_t - 1):
+                if a == 0 and b == n_t - 1:
+                    a, b = b, a                       # the wall foot edge closes the ring
+                keep_a, keep_b = keep_foot(terr_coord[a]), keep_foot(terr_coord[b])
+                if (keep_a or keep_b) and n_t + keep_a + keep_b <= 6:
+                    ring = []
+                    for t in range(n_t):
+                        if t == a:
+                            ring.extend([terr_coord[t], tops[a]] if keep_a else [tops[a]])
+                        elif t == b:
+                            ring.extend([tops[b], terr_coord[t]] if keep_b else [tops[b]])
+                        else:
+                            ring.append(terr_coord[t])
+                    vert_order = np.zeros((8, 3), dtype=object)
+                    vert_order[:] = None
+                    vert_order[:len(ring)] = np.asarray(ring).astype('float')
+                    return vert_order
+
         # only_top = True if wall_coord_t[0,2] == wall_coord_t[1,2] else False
         # loop for detection when points are above each other
         trtw = []
@@ -3961,6 +3997,53 @@ class CctProcessing(BaseTask):
         debug('Deleting all unwanted rows')
         sqltext = f'delete from "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_faces}" where id = any(%s)'
         self.execute(sqltext, (id2del,))
+
+    def snap_vertices_to_edges(self):
+        """Move vertices that lie on no grid edge onto the nearest one.
+
+        Every cut-cell vertex is described as a corner plus a shift along one
+        grid edge, so it may be off the grid lines in one coordinate only. Where
+        the terrain inside a cell is not planar (a fold of the terrain triangles
+        crossing a grid level inside a cell face, e.g. next to the terrain
+        raised along walls) a vertex can end up inside a cell face; its
+        description then names a point up to a cell away from it. Such a vertex
+        keeps the coordinate furthest from a grid line and the others are
+        rounded onto their grid lines. The move depends on the position only,
+        so all faces sharing the vertex move it alike and stay connected.
+        """
+        d = self.cfg.domain
+        cs, tb = self.cfg.domain.case_schema, self.cfg.tables.slanted_faces
+        moved = set()
+        for ni in range(1, 8):
+            v = f'vert{ni}'
+            x, y, z = (f'((st_x({v}) - {d.origin_x}) / {d.dx})', f'((st_y({v}) - {d.origin_y}) / {d.dy})',
+                       f'(st_z({v}) / {d.dz})')
+            ex, ey, ez = (f'abs({c} - round({c}))' for c in (x, y, z))
+            keep_x = f'({ex} >= {ey} and {ex} >= {ez})'
+            keep_y = f'(not {keep_x} and {ey} >= {ez})'
+            keep_z = f'(not {keep_x} and not {keep_y})'
+            n = self.execute(f"""
+                update "{cs}"."{tb}" set {v} = st_setsrid(st_makepoint(
+                    case when {keep_x} then st_x({v}) else round({x}) * {d.dx} + {d.origin_x} end,
+                    case when {keep_y} then st_y({v}) else round({y}) * {d.dy} + {d.origin_y} end,
+                    case when {keep_z} then st_z({v}) else round({z}) * {d.dz} end), %s)
+                where {v} is not null
+                  and ({ex} > 1e-8)::int + ({ey} > 1e-8)::int + ({ez} > 1e-8)::int >= 2
+                returning id
+            """, (self.cfg.srid_palm,))
+            moved.update(r[0] for r in n or [])
+        if not moved:
+            return
+        verbose('{} face(s) had vertices off the grid edges; moved onto the nearest edge', len(moved))
+        # rebuild the polygons and centres of the faces whose vertices moved
+        self.execute(f"""
+            update "{cs}"."{tb}" set geom = st_forcerhr(st_setsrid(st_makepolygon(st_makeline(array[
+                vert1, vert2, vert3, vert4, vert5, vert6, vert7,
+                coalesce(vert1, vert2, vert3, vert4, vert5, vert6, vert7)])), %s))
+            where id = any(%s)
+        """, (self.cfg.srid_palm, list(moved)))
+        self.execute(f'update "{cs}"."{tb}" set center = {self._face_center_sql()} where id = any(%s)',
+                     (self.cfg.srid_palm, list(moved)))
 
     def create_integer_vertices(self):
         """ create coordinates of vertices using 4 integer and 1 float
@@ -4763,6 +4846,8 @@ class CctProcessing(BaseTask):
                 )
             """
             self.execute(sqltext)
+
+        self.snap_vertices_to_edges()
 
         # calculate normal vector using triangulation
         self.normal_vector_trinagulation()
