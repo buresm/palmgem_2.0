@@ -4,7 +4,7 @@ A brief overview how tree are processed in PALM-GeM into PALM *static driver*.
 Following table show requirements for input GIS shape file with trees. The "Standard" column is the name PALM-GeM uses internally; the "Legacy example" shows a historical Czech name. If your source data uses a different column name, map it via `attribute_mapping.trees.<standard>: <your column>` in your config (e.g. `attribute_mapping.trees.treeh: vysstr`) — one name per column — and it is renamed during import. See [Attribute mapping](configuration_docs.md#attribute-mapping).
 | Attribute | Type  | Values | Desription |
 |:----------|:------|:-------|:----------------------|
-| gid       | int   | >1     | unique identified for each tree |
+| sid       | int   | >1     | unique identifier for each tree; optional, the column is named by `idx.trees` (default `sid`) and added when missing |
 | typstr    | int   | 0, 1,  | Type of tree, see below defined tree types, in case of treelad is not defined |
 | vysstr    | real  | > 0.0  | Height of the tree |
 | vyskmen   | real  | > 0.0  | Height of tree trunk |

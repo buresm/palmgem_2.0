@@ -76,12 +76,12 @@ class InitializeDomainTask(BaseTask):
 
     def create_grid(self):
         """
-        create regular grid from configuration using palm_create_grid psql function.
+        create regular grid from configuration using palm_create_grid_2 psql function.
         """
         debug(f'creating regular case grid: {self.cfg.tables.grid}')
 
         # call the stored procedure
-        sql_proc = "select palm_create_grid(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+        sql_proc = "select palm_create_grid_2(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
 
         params = (
             self.cfg.domain.case_schema,
@@ -1033,7 +1033,7 @@ class InitializeDomainTask(BaseTask):
         # `lc_intersect` from the build_new serial — two independent sequences
         # that overlap — and st_dump emits several rows per source lid. Carrying
         # them forward produced duplicate lids, so the fresh serial primary key
-        # below could never be created (and palm_fill_building_holes later
+        # below could never be created (and palm_fill_building_holes_2 later
         # crashed on ADD PRIMARY KEY). grid.lid is re-derived from this table in
         # connect_landcover_grid(), so the original lid values are not needed.
         #
@@ -2038,7 +2038,7 @@ class InitializeDomainTask(BaseTask):
         # call the stored procedure
         # we pass parameters for schema, tables, building type ranges, and domain dimensions
         sql_call = f"""
-            select palm_fill_building_holes(
+            select palm_fill_building_holes_2(
                 %s, 
                 %s, 
                 %s, 
@@ -2855,8 +2855,8 @@ class InitializeDomainTask(BaseTask):
             """, (max_sid, self.cfg.domain.origin_x, self.cfg.domain.origin_y, self.cfg.domain.dz, direction_down))
 
         # 6. vertical surfaces via stored procedure
-        debug('generating vertical surfaces via palm_vertical_surfaces')
-        sql_proc = f"select palm_vertical_surfaces(%s, %s, %s, %s, %s)"
+        debug('generating vertical surfaces via palm_vertical_surfaces_2')
+        sql_proc = f"select palm_vertical_surfaces_2(%s, %s, %s, %s, %s)"
         self.execute(sql_proc, (
             self.cfg.domain.case_schema, self.cfg.tables.surfaces,
             self.cfg.tables.building_walls, self.cfg.domain.dz, self.cfg.logs.level

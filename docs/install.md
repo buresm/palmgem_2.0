@@ -175,6 +175,13 @@ Get-ChildItem src\sql_function\*.sql | ForEach-Object { & $psql -h localhost -U 
 
 The functions use `CREATE OR REPLACE`, so re-running this after an update is safe.
 
+The functions are named with a `_2` suffix (`palm_create_grid_2`, `palm_fill_building_holes_2`,
+`palm_vertical_surfaces_2`, `palm_tree_grid_2`), so PALM-GeM 1.0 and 2.0 can share one database: 1.0
+keeps its own `palm_create_grid` and `palm_fill_building_holes`. Sharing a database is safe only when
+the two versions also use different case schemas (`domain.name` + `domain.scenario`) and different
+input schemas, because 2.0 renames and adds columns in its input tables
+(`attribute_mapping`, UrbanAtlas/OSM processing).
+
 ---
 
 ## Running PALM-GeM

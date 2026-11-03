@@ -25,7 +25,7 @@ CREATE SEQUENCE IF NOT EXISTS spatial_ref_sys_srid_seq MINVALUE 100000;
 * The resolution of the grid is dx,dy, center is cx,cy
 * and coordinate system srid.
 *************************/
-drop function if exists palm_create_grid(
+drop function if exists palm_create_grid_2(
     grid_schema text,
     grid_table text,
     nx integer,
@@ -40,7 +40,7 @@ drop function if exists palm_create_grid(
     pg_owner text,
     debug_level integer);
 
-create or replace function palm_create_grid(
+create or replace function palm_create_grid_2(
     grid_schema text,
     grid_table text,
     nx integer,

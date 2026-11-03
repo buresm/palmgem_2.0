@@ -58,8 +58,8 @@ class LadGenerator(BaseTask):
             self.execute(sql_alter)
 
         # 5. call the stored procedure to distribute tree properties into the grid
-        progress('distributing tree properties into the 3d grid (palm_tree_grid)')
-        sql_proc = "select palm_tree_grid(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+        progress('distributing tree properties into the 3d grid (palm_tree_grid_2)')
+        sql_proc = "select palm_tree_grid_2(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
         params = (
             self.cfg.domain.case_schema,
             self.cfg.tables.trees,

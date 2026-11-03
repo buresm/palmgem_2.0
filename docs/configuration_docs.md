@@ -16,7 +16,7 @@
 | **run_tasks** | [setup] | Ordered list of task keys to execute (`setup` and `finalize` always run first/last). Available: `gis_import`, `urban_atlas_osm`, `urban_atlas_dem_buildings`, `prepare_slurb`, `initialize_domain`, `lad`, `lai`, `cct_processing`, `static_driver`, `slurb_driver`, `cct_driver`, `pids_check`, `qa_report`, `qgis_export`; see [tasks.md](tasks.md) |
 | **data_imports** | see YAML | Files imported by `gis_import`. Each entry under `vectors:` or `rasters:` has `path` (file), `table` (target table in **input_schema**) and `srid`. A user value replaces the defaults wholesale |
 | **logs.level** | 25 | Logging verbosity level. See [logging docs](general.md). Values: 5=EXTRA_VERBOSE, 10=DEBUG, 15=VERBOSE, 25=PROGRESS, 30=WARNING, 40=ERROR |
-| **logs.level_trees** | -1 | Log level of the tree gridding SQL function (`palm_tree_grid`); -1 = same as **logs.level** |
+| **logs.level_trees** | -1 | Log level of the tree gridding SQL function (`palm_tree_grid_2`); -1 = same as **logs.level** |
 | **logs.level_buildings** | -1 | Per-area log level; -1 = same as **logs.level**. Reserved: no code reads it at present |
 | **logs.level_landcover** | -1 | Per-area log level, reserved (see **logs.level_buildings**) |
 | **logs.level_build_walls** | -1 | Per-area log level, reserved (see **logs.level_buildings**) |

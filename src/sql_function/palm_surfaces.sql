@@ -3,14 +3,14 @@ CREATE SEQUENCE IF NOT EXISTS spatial_ref_sys_srid_seq MINVALUE 100000;
 /************************
 * Create table of surfaces
 *************************/
-drop function if exists palm_vertical_surfaces(
+drop function if exists palm_vertical_surfaces_2(
     case_schema text,
     surfaces_table text,
     building_walls_table text,
     dz double precision,
     debug_level integer);
 
-create or replace function palm_vertical_surfaces(
+create or replace function palm_vertical_surfaces_2(
     case_schema text,
     surfaces_table text,
     building_walls_table text,

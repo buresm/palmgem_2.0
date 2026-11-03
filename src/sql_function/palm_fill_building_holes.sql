@@ -24,7 +24,7 @@ CREATE SEQUENCE IF NOT EXISTS spatial_ref_sys_srid_seq MINVALUE 100000;
 * Function that fills holes in building. Holes in building are defined that >= 3 neighbors are defined as building while
 * hole grid is defined as non building
 *************************/
-drop function if exists palm_fill_building_holes(
+drop function if exists palm_fill_building_holes_2(
     case_schema text,
     grid_table text,
     landcover_table text,
@@ -34,7 +34,7 @@ drop function if exists palm_fill_building_holes(
     ny integer,
     debug_level integer);
 
-create or replace function palm_fill_building_holes(
+create or replace function palm_fill_building_holes_2(
     case_schema text,
     grid_table text,
     landcover_table text,

@@ -23,4 +23,4 @@ The `*_mod` multipliers allow scenario generation (e.g. seasonal LAI reduction) 
 
 ## Individual tree LAD approach
 
-See [tree.md](tree.md) for the point-tree gridding algorithm (`palm_tree_grid` SQL function), which produces per-layer `lad_<k>` / `bad_<k>` columns directly rather than a single LAI value.
+See [tree.md](tree.md) for the point-tree gridding algorithm (`palm_tree_grid_2` SQL function), which produces per-layer `lad_<k>` / `bad_<k>` columns directly rather than a single LAI value.

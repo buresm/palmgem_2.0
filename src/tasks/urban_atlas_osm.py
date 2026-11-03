@@ -62,10 +62,10 @@ class UrbanAtlasOSM(BaseTask):
         xs = (xl + xh_new) / 2.0
         ys = (yl + yh_new) / 2.0
 
-        debug('creating fishnet using palm_create_grid psql function')
+        debug('creating fishnet using palm_create_grid_2 psql function')
 
-        # build the fishnet with palm_create_grid
-        sqltext = "select palm_create_grid(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+        # build the fishnet with palm_create_grid_2
+        sqltext = "select palm_create_grid_2(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
 
         params = (
             self.cfg.input_schema,

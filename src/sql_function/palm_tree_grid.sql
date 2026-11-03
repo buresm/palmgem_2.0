@@ -21,7 +21,7 @@
 /************************
 * Generation of the the complete LAD structure of all trees (crown, branches, and trunk)
 *************************/
-create or replace function palm_tree_grid(
+create or replace function palm_tree_grid_2(
     case_schema text,
     tree_table text,
     tree_grid_table text,
@@ -99,6 +99,10 @@ declare
 begin
     ret = false;
     -- name of the fiels in tree table
+    -- tid is only logged; the id column of the trees table is set by idx.trees
+    -- (sid by default, added by initialize_domain when missing), so the select
+    -- below numbers the trees instead of reading a fixed column. tree_id is kept
+    -- but no longer used.
     tree_id = 'gid';  -- tid
     tree_height = 'treeh'; -- th
     tree_trunk_height = 'trunkh'; -- tb
@@ -130,11 +134,11 @@ begin
     -- formula for calculation of lad reduction - leaf and coniferous tree
     text2 = format('case when %I = ''0'' then %s else 1.0 end', tree_coniferous, lad_reduction);
     -- tree information select
-    sqltext = format('select %I, %I, %I, %I, %I, ' || text1 || ', ' || text2 ||
+    sqltext = format('select row_number() over (), %I, %I, %I, %I, ' || text1 || ', ' || text2 ||
                      ', (ST_Dump(geom)).geom, ST_X((ST_Dump(geom)).geom), ST_Y((ST_Dump(geom)).geom) ' ||
                      ' from %I.%I' ||
                      ' where %I > 0 and %I > 0 ',
-                     tree_id, tree_height, tree_trunk_height, tree_crown_radius, tree_crown_shape,
+                     tree_height, tree_trunk_height, tree_crown_radius, tree_crown_shape,
 					      case_schema, tree_table,
 					      tree_height, tree_crown_radius);
 	if debug_level < 3 then
