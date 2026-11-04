@@ -111,6 +111,10 @@ class CctProcessing(BaseTask):
                     updates.append((n, best, fid))
         if not updates:
             return
+        # the faces have no index on id yet, and every batched update would
+        # scan the whole table (create_vertices_indexes drops the column, and
+        # with it this index, when it renumbers the faces)
+        self.execute(f'create index if not exists "{table}_id_idx" on "{schema}"."{table}" (id)')
         for n in range(1, 8):
             batch = [(b[0], b[1], b[2], b[3], b[4], fid) for m, b, fid in updates if m == n]
             if batch:
@@ -185,12 +189,22 @@ class CctProcessing(BaseTask):
                 if target - adjust != tnz:
                     set_tnz.append((target - adjust, (target - adjust - tnz) * dz, gid))
 
+        def batch_by_id(table, sql, params):
+            # the grid tables are keyed by (i, j, lid): without an index on id
+            # every update of the batch scans the whole table. The index only
+            # lives for the batch, so the set-based statements below keep their
+            # plans (and the order they write rows in)
+            idx = f'{table}_cct_align_id_idx'
+            self.execute(f'create index if not exists "{idx}" on "{schema}"."{table}" (id)')
+            self.execute_batch(sql, params)
+            self.execute(f'drop index if exists "{schema}"."{idx}"')
+
         if set_bnz:
-            self.execute_batch(f'update "{schema}"."{bgrid_t}" set nz = %s, height = %s where id = %s', set_bnz)
+            batch_by_id(bgrid_t, f'update "{schema}"."{bgrid_t}" set nz = %s, height = %s where id = %s', set_bnz)
         if drop_build:
             self.execute(f'delete from "{schema}"."{bgrid_t}" where id = any(%s)', (drop_build,))
         if set_lid:
-            self.execute_batch(f'update "{schema}"."{grid_t}" set lid = %s where id = %s', set_lid)
+            batch_by_id(grid_t, f'update "{schema}"."{grid_t}" set lid = %s where id = %s', set_lid)
         if near_land:
             # former building columns whose land face has no land polygon: nearest one
             self.execute(f"""
@@ -200,8 +214,8 @@ class CctProcessing(BaseTask):
                 where g.id = any(%s)
             """, (self.cfg.type_range.building_min, self.cfg.type_range.building_max, near_land))
         if set_tnz:
-            self.execute_batch(f'update "{schema}"."{grid_t}" set nz = %s, height = height + %s where id = %s',
-                               set_tnz)
+            batch_by_id(grid_t, f'update "{schema}"."{grid_t}" set nz = %s, height = height + %s where id = %s',
+                        set_tnz)
         if new_build:
             # one statement: every new column copies the nearest existing building cell
             values = ', '.join(f'({gid}, {nz})' for gid, nz in new_build)
@@ -1917,291 +1931,242 @@ class CctProcessing(BaseTask):
         z_max = self.execute(sqltext)[0][0]
         k_max = int(np.ceil(z_max) / self.cfg.domain.dz) + 2
 
-        debug('loop over all k-levels')
-        for k in range(0, k_max):
-            debug(f'k={k}')
-            # create temp table
-            verbose('drop temp table')
-            self.execute(
-                f'drop table if exists "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_terrain_gridded_temp}"')
+        schema = self.cfg.domain.case_schema
+        table = self.cfg.tables.slanted_terrain_gridded
+        srid = self.cfg.srid_palm
+        dz = self.cfg.domain.dz
 
-            verbose('create temp table')
-            self.execute(f"""
-                create table "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_terrain_gridded_temp}" as 
-                select id, lid, geom3d 
-                from "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_terrain}"
-            """)
+        # Every terrain face is cut by the levels k*dz - dz and k*dz: along each
+        # of its (up to five) edges p1 -> p2 the crossing of the lower level
+        # (mezi_dolni), of the upper level (mezi_horni) and the end point p2
+        # when it lies between them; three or more points give a face piece of
+        # level k. This used to rebuild a temp table and run 21 full-table
+        # updates per level; one insert now computes the same expressions per
+        # (level, face) pair, for the levels a face can reach only, and inserts
+        # the pieces level by level, the faces in table order (the former temp
+        # table was read back in the order its updates left it in).
+        self.execute(f'drop table if exists "{schema}"."{self.cfg.tables.slanted_terrain_gridded_temp}"')
+        self.execute(f'alter table "{schema}"."{table}" add column if not exists rgid serial')
+        self.execute(f"""
+            alter table "{schema}"."{table}"
+            add column if not exists vert1 geometry(pointz, %s), add column if not exists vert2 geometry(pointz, %s),
+            add column if not exists vert3 geometry(pointz, %s), add column if not exists vert4 geometry(pointz, %s),
+            add column if not exists vert5 geometry(pointz, %s), add column if not exists vert6 geometry(pointz, %s),
+            add column if not exists vert7 geometry(pointz, %s), add column if not exists z_max double precision,
+            add column if not exists z_min double precision, add column if not exists k_max integer,
+            add column if not exists n_vert integer
+        """, (srid,) * 7)
 
-            verbose('add new columns in temp table')
-            self.execute(f"""
-                alter table "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_terrain_gridded_temp}" 
-                add column if not exists npoints integer, 
-                add column if not exists z1 double precision, 
-                add column if not exists z2 double precision, 
-                add column if not exists mezi_dolni boolean default false, 
-                add column if not exists mezi_horni boolean default false, 
-                add column if not exists p1 geometry(pointz, %s), 
-                add column if not exists p2 geometry(pointz, %s)
-            """, (self.cfg.srid_palm,) * 2)
+        # the level bounds as the per-level statements spelled them ({k_dz} and
+        # {k_dz}-{dz} literals), so the comparisons and the crossings compute
+        # with the same constants
+        levels = ', '.join(f'({k}, {k * dz}, {k * dz}-{dz})' for k in range(0, k_max))
+        cand = []
+        for po in range(1, 6):  # 6 points is maximum and the last is repeated
+            p1, p2 = f'f.p{po}', f'f.p{po + 1}'
+            mezi_dolni = (f'case when st_z({p1}) < (lv.lo) and (st_z({p2}) > (lv.lo)) then true '
+                          f'when st_z({p1}) > (lv.lo) and (st_z({p2}) < (lv.lo)) then true else false end')
+            mezi_horni = (f'case when st_z({p1}) < lv.hi and (st_z({p2}) > lv.hi) then true '
+                          f'when st_z({p1}) > lv.hi and (st_z({p2}) < lv.hi) then true else false end')
+            z2 = (f'case when st_z({p2}) < (lv.lo) then null when st_z({p2}) > lv.hi then lv.hi '
+                  f'else st_z({p2}) end')
+            cand += [
+                f"""case when {mezi_dolni} then st_setsrid(st_makepoint(
+                        st_x({p1}) + (lv.lo-st_z({p1}))/(st_z({p2})-st_z({p1}))*(st_x({p2})-st_x({p1})),
+                        st_y({p1}) + (lv.lo-st_z({p1}))/(st_z({p2})-st_z({p1}))*(st_y({p2})-st_y({p1})),
+                        lv.lo), {srid}) else null end""",
+                f"""case when {mezi_horni} then st_setsrid(st_makepoint(
+                        st_x({p1}) + (lv.hi-st_z({p1}))/(st_z({p2})-st_z({p1}))*(st_x({p2})-st_x({p1})),
+                        st_y({p1}) + (lv.hi-st_z({p1}))/(st_z({p2})-st_z({p1}))*(st_y({p2})-st_y({p1})),
+                        lv.hi), {srid}) else null end""",
+                f"""case when st_z({p2}) >= (lv.lo) and st_z({p2}) <= lv.hi
+                        then st_setsrid(st_makepoint(st_x({p2}), st_y({p2}), {z2}), {srid}) else null end"""]
+        ring = ', '.join(f'st_pointn(st_exteriorring(geom3d), {n}) as p{n}' for n in range(1, 7))
+        pz = ', '.join(f'st_z(p{n})' for n in range(1, 7))
+        gz = ', '.join(f'st_z(st_geometryn(points, {n}))' for n in range(1, 8))
 
-            verbose('loop over all points')
-            for po in range(1, 6):  # 6 points is maximum and the last is repeated
-                verbose(f'point {po}')
-                self.execute(f"""
-                    alter table "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_terrain_gridded_temp}" 
-                    add column if not exists p{po}_mezid geometry(pointz, %s), 
-                    add column if not exists p{po}_mezih geometry(pointz, %s), 
-                    add column if not exists p{po}_f geometry(pointz, %s)
-                """, (self.cfg.srid_palm,) * 3)
-
-                self.execute(f"""
-                    update "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_terrain_gridded_temp}" set 
-                    p1 = st_pointn(st_exteriorring(geom3d), {po}), 
-                    p2 = st_pointn(st_exteriorring(geom3d), {po}+1)
-                """)
-
-                dz = self.cfg.domain.dz
-                k_dz = k * dz
-                self.execute(f"""
-                    update "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_terrain_gridded_temp}" set 
-                    mezi_dolni = case when st_z(p1) < ({k_dz}-{dz}) and (st_z(p2) > ({k_dz}-{dz})) then true
-                                      when st_z(p1) > ({k_dz}-{dz}) and (st_z(p2) < ({k_dz}-{dz})) then true
-                                      else false end, 
-                    mezi_horni = case when st_z(p1) < {k_dz} and (st_z(p2) > {k_dz}) then true
-                                      when st_z(p1) > {k_dz} and (st_z(p2) < {k_dz}) then true 
-                                      else false end, 
-                    z2 = case when st_z(p2) < ({k_dz}-{dz}) then null
-                              when st_z(p2) > {k_dz} then {k_dz}
-                              else st_z(p2) end
-                """)
-
-                self.execute(f"""
-                    update "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_terrain_gridded_temp}" set 
-                    p{po}_mezid = case when mezi_dolni then st_setsrid(st_makepoint(
-                        st_x(p1) + ({k_dz}-{dz}-st_z(p1))/(st_z(p2)-st_z(p1))*(st_x(p2)-st_x(p1)), 
-                        st_y(p1) + ({k_dz}-{dz}-st_z(p1))/(st_z(p2)-st_z(p1))*(st_y(p2)-st_y(p1)), 
-                        {k_dz}-{dz}), %s) else null end, 
-                    p{po}_mezih = case when mezi_horni then st_setsrid(st_makepoint(
-                        st_x(p1) + ({k_dz}-st_z(p1))/(st_z(p2)-st_z(p1))*(st_x(p2)-st_x(p1)), 
-                        st_y(p1) + ({k_dz}-st_z(p1))/(st_z(p2)-st_z(p1))*(st_y(p2)-st_y(p1)), 
-                        {k_dz}), %s) else null end, 
-                    p{po}_f = case when st_z(p2) >= ({k_dz}-{dz}) and st_z(p2) <= {k_dz} 
-                              then st_setsrid(st_makepoint(st_x(p2), st_y(p2), z2), %s) else null end
-                """, (self.cfg.srid_palm,) * 3)
-
-                # set mezi_dolni, mezi_horni to false
-                self.execute(
-                    f'update "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_terrain_gridded_temp}" set mezi_dolni = false, mezi_horni = false')
-
-            # gather point to form polygon
-            debug('gathering points')
-            self.execute(f"""
-                update "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_terrain_gridded_temp}" set 
-                npoints = (case when p1_mezid is not null then 1 else 0 end + case when p1_mezih is not null then 1 else 0 end + case when p1_f is not null then 1 else 0 end + 
-                           case when p2_mezid is not null then 1 else 0 end + case when p2_mezih is not null then 1 else 0 end + case when p2_f is not null then 1 else 0 end + 
-                           case when p3_mezid is not null then 1 else 0 end + case when p3_mezih is not null then 1 else 0 end + case when p3_f is not null then 1 else 0 end + 
-                           case when p4_mezid is not null then 1 else 0 end + case when p4_mezih is not null then 1 else 0 end + case when p4_f is not null then 1 else 0 end + 
-                           case when p5_mezid is not null then 1 else 0 end + case when p5_mezih is not null then 1 else 0 end + case when p5_f is not null then 1 else 0 end)
-            """)
-
-            debug('insert point into points collection')
-            self.execute(f"""
-                insert into "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_terrain_gridded}" (id, lid, points) 
-                select id, lid, st_setsrid(st_collect(array[p1_mezid, p1_mezih, p1_f, p2_mezid, p2_mezih, p2_f, p3_mezid, p3_mezih, p3_f, p4_mezid, p4_mezih, p4_f, p5_mezid, p5_mezih, p5_f]), %s) 
-                from "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_terrain_gridded_temp}" 
-                where npoints > 2
-            """, (self.cfg.srid_palm,))
-        debug('creating polygon geom')
-        self.execute(
-            f'update "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_terrain_gridded}" set geom = st_setsrid(st_convexhull(points), %s)',
-            (self.cfg.srid_palm,))
-
-        verbose('updating its srid')
-        self.execute(
-            f'update "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_terrain_gridded}" set lines = st_setsrid(st_boundary(geom), %s)',
-            (self.cfg.srid_palm,))
+        debug('cutting the terrain faces by the k-levels')
+        self.execute(f"""
+            insert into "{schema}"."{table}" (id, lid, geom, points, lines, vert1, vert2, vert3, vert4, vert5,
+                                              vert6, vert7, n_vert, z_max, z_min)
+            select id, lid, geom, points, st_setsrid(st_boundary(geom), {srid}),
+                   st_pointn(st_boundary(geom), 1), st_pointn(st_boundary(geom), 2),
+                   st_pointn(st_boundary(geom), 3), st_pointn(st_boundary(geom), 4),
+                   st_pointn(st_boundary(geom), 5), st_pointn(st_boundary(geom), 6),
+                   st_pointn(st_boundary(geom), 7),
+                   st_npoints(points)+1, greatest({gz}), least({gz})
+            from (
+                select k, tid, id, lid, points, st_setsrid(st_convexhull(points), {srid}) as geom
+                from (
+                    select lv.k, f.tid, f.id, f.lid,
+                           st_setsrid(st_collect(c.pts), {srid}) as points
+                    from (select ctid as tid, id, lid, {ring}
+                          from "{schema}"."{self.cfg.tables.slanted_terrain}" offset 0) as f
+                    join (values {levels}) as lv(k, hi, lo)
+                      on lv.k between floor(least({pz}) / {dz}) - 1 and ceil(greatest({pz}) / {dz}) + 1
+                    cross join lateral (select array[{', '.join(cand)}] as pts offset 0) as c
+                    where (select count(*) from unnest(c.pts) as u(p) where u.p is not null) > 2
+                    offset 0
+                ) as cut
+                offset 0
+            ) as pieces
+            order by k, tid
+        """)
 
         # delete duplicates
         verbose('deleting duplicates')
-        self.execute(
-            f'alter table "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_terrain_gridded}" add column if not exists rgid serial')
-
         self.execute(f"""
-            delete from "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_terrain_gridded}" 
-            where rgid in (select rgid from (select rgid, row_number() over (partition by geom order by id) as rownumber 
-            from "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_terrain_gridded}") as t where t.rownumber > 1)
+            delete from "{schema}"."{table}"
+            where rgid in (select rgid from (select rgid, row_number() over (partition by geom order by id) as rownumber
+            from "{schema}"."{table}") as t where t.rownumber > 1)
         """)
 
         # mb here
         debug('separate polygon when 3 or more vertices has z = (k+1)*dz')
-        self.execute(f"""
-            alter table "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_terrain_gridded}" 
-            add column if not exists vert1 geometry(pointz, %s), add column if not exists vert2 geometry(pointz, %s), 
-            add column if not exists vert3 geometry(pointz, %s), add column if not exists vert4 geometry(pointz, %s), 
-            add column if not exists vert5 geometry(pointz, %s), add column if not exists vert6 geometry(pointz, %s), 
-            add column if not exists vert7 geometry(pointz, %s), add column if not exists z_max double precision, 
-            add column if not exists z_min double precision, add column if not exists k_max integer, 
-            add column if not exists n_vert integer
-        """, (self.cfg.srid_palm,) * 7)
-
-        verbose('create vert points')
-        self.execute(f"""
-            update "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_terrain_gridded}" set 
-            vert1 = st_pointn(st_boundary(geom), 1), vert2 = st_pointn(st_boundary(geom), 2), 
-            vert3 = st_pointn(st_boundary(geom), 3), vert4 = st_pointn(st_boundary(geom), 4), 
-            vert5 = st_pointn(st_boundary(geom), 5), vert6 = st_pointn(st_boundary(geom), 6), 
-            vert7 = st_pointn(st_boundary(geom), 7)
-        """)
-
-        verbose('calculate number of points')
-        self.execute(
-            f'update "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_terrain_gridded}" set n_vert = st_npoints(points)+1')
-
-        self.execute(f"""
-            update "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_terrain_gridded}" set 
-            z_max = greatest(st_z(st_geometryn(points, 1)), st_z(st_geometryn(points, 2)), st_z(st_geometryn(points, 3)), 
-                             st_z(st_geometryn(points, 4)), st_z(st_geometryn(points, 5)), st_z(st_geometryn(points, 6)), st_z(st_geometryn(points, 7))),
-            z_min = least(st_z(st_geometryn(points, 1)), st_z(st_geometryn(points, 2)), st_z(st_geometryn(points, 3)), 
-                          st_z(st_geometryn(points, 4)), st_z(st_geometryn(points, 5)), st_z(st_geometryn(points, 6)), st_z(st_geometryn(points, 7)))
-        """)
-
         verbose('selecting polygons')
-        z_max = self.execute(
-            f'select max(z_max) from "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_terrain_gridded}"')[0][0]
+        z_max = self.execute(f'select max(z_max) from "{schema}"."{table}"')[0][0]
         k_max = int(np.floor(z_max) + 2)
 
+        # A piece with three or more vertices on the level (k+1)*dz is split in
+        # two. It used to be one query per level; a piece is split at the first
+        # level that selects it (the pieces made here have no z_min, so later
+        # levels never select them, and the split does not depend on k), so
+        # one query picks them all and they are split level by level, in table
+        # order within a level, as before.
+        level_k = {}
         for k in range(0, k_max):
-            sqltext = f"""
-                select id, rgid, lid, n_vert, 
-                array[st_x(vert1), st_y(vert1), st_z(vert1)],  
-                array[st_x(vert2), st_y(vert2), st_z(vert2)], 
-                array[st_x(vert3), st_y(vert3), st_z(vert3)], 
-                array[st_x(vert4), st_y(vert4), st_z(vert4)], 
-                array[st_x(vert5), st_y(vert5), st_z(vert5)], 
-                array[st_x(vert6), st_y(vert6), st_z(vert6)], 
-                array[st_x(vert7), st_y(vert7), st_z(vert7)]  
-                from "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_terrain_gridded}" as s 
-                where (case when st_z(vert1) = {(k + 1) * self.cfg.domain.dz} then 1 else 0 end + 
-                       case when st_z(vert2) = {(k + 1) * self.cfg.domain.dz} then 1 else 0 end + 
-                       case when st_z(vert3) = {(k + 1) * self.cfg.domain.dz} then 1 else 0 end + 
-                       case when st_z(vert4) = {(k + 1) * self.cfg.domain.dz} and n_vert > 4 then 1 else 0 end + 
-                       case when st_z(vert5) = {(k + 1) * self.cfg.domain.dz} and n_vert > 5 then 1 else 0 end + 
-                       case when st_z(vert6) = {(k + 1) * self.cfg.domain.dz} and n_vert > 6 then 1 else 0 end + 
-                       case when st_z(vert7) = {(k + 1) * self.cfg.domain.dz} and n_vert > 7 then 1 else 0 end) > 2 
-                      and n_vert > 3 and z_min != z_max 
-            """
-            verts = self.execute(sqltext)
+            level_k.setdefault((k + 1) * self.cfg.domain.dz, k)
+        sqltext = f"""
+            select id, rgid, lid, n_vert,
+            array[st_x(vert1), st_y(vert1), st_z(vert1)],
+            array[st_x(vert2), st_y(vert2), st_z(vert2)],
+            array[st_x(vert3), st_y(vert3), st_z(vert3)],
+            array[st_x(vert4), st_y(vert4), st_z(vert4)],
+            array[st_x(vert5), st_y(vert5), st_z(vert5)],
+            array[st_x(vert6), st_y(vert6), st_z(vert6)],
+            array[st_x(vert7), st_y(vert7), st_z(vert7)]
+            from "{schema}"."{table}" as s
+            where n_vert > 3 and z_min != z_max
+        """
+        selected = []
+        for pos, vert in enumerate(self.execute(sqltext)):
+            # vert4..vert7 count only when n_vert exceeds their number
+            zs = [vert[4 + n][2] for n in range(7) if n < 3 or vert[3] > n + 1]
+            hits = [level_k[z] for z in set(zs) if z is not None and z in level_k and zs.count(z) > 2]
+            if hits:
+                selected.append((min(hits), pos, vert))
+        verts = [vert for _, _, vert in sorted(selected, key=lambda s: s[:2])]
 
-            to_insert = []
-            to_delete = []
-            for vert in verts:
-                p1 = []
-                p2 = []
-                np_verts_p1 = np.empty((7, 3), dtype=object)
-                np_verts_p2 = np.empty((7, 3), dtype=object)
-                id, rgid, lid, n_vert = vert[0], vert[1], vert[2], vert[3]
-                lastidx = 4
-                x_vert, y_vert, z_vert = [], [], []
-                for idx in range(n_vert):
-                    if vert[lastidx + idx][0] is not None:
-                        x_vert.append(vert[lastidx + idx][0])
-                        y_vert.append(vert[lastidx + idx][1])
-                        z_vert.append(vert[lastidx + idx][2])
-                # n_vert counts the closing point; walk the ring over the distinct
-                # points only, otherwise point 0 is its own neighbour and a face with
-                # 6 distinct points overflows the 7-row arrays below
-                if len(x_vert) > 1 and (x_vert[-1], y_vert[-1], z_vert[-1]) == (x_vert[0], y_vert[0], z_vert[0]):
-                    x_vert, y_vert, z_vert = x_vert[:-1], y_vert[:-1], z_vert[:-1]
-                x_vert = np.asarray(x_vert)
-                y_vert = np.asarray(y_vert)
-                z_vert = np.asarray(z_vert)
-                tt_max = max(z_vert)
-                for it, ttt in enumerate(z_vert):
-                    if it == 0:
-                        ileft = len(z_vert) - 1
-                        iright = it + 1
-                    elif it == len(z_vert) - 1:
-                        iright = 0
-                        ileft = it - 1
-                    else:
-                        iright = it + 1
-                        ileft = it - 1
-                    if z_vert[ileft] == tt_max and z_vert[it] == tt_max and z_vert[iright] == tt_max:
+        to_insert = []
+        to_delete = []
+        for vert in verts:
+            p1 = []
+            p2 = []
+            np_verts_p1 = np.empty((7, 3), dtype=object)
+            np_verts_p2 = np.empty((7, 3), dtype=object)
+            id, rgid, lid, n_vert = vert[0], vert[1], vert[2], vert[3]
+            lastidx = 4
+            x_vert, y_vert, z_vert = [], [], []
+            for idx in range(n_vert):
+                if vert[lastidx + idx][0] is not None:
+                    x_vert.append(vert[lastidx + idx][0])
+                    y_vert.append(vert[lastidx + idx][1])
+                    z_vert.append(vert[lastidx + idx][2])
+            # n_vert counts the closing point; walk the ring over the distinct
+            # points only, otherwise point 0 is its own neighbour and a face with
+            # 6 distinct points overflows the 7-row arrays below
+            if len(x_vert) > 1 and (x_vert[-1], y_vert[-1], z_vert[-1]) == (x_vert[0], y_vert[0], z_vert[0]):
+                x_vert, y_vert, z_vert = x_vert[:-1], y_vert[:-1], z_vert[:-1]
+            x_vert = np.asarray(x_vert)
+            y_vert = np.asarray(y_vert)
+            z_vert = np.asarray(z_vert)
+            tt_max = max(z_vert)
+            for it, ttt in enumerate(z_vert):
+                if it == 0:
+                    ileft = len(z_vert) - 1
+                    iright = it + 1
+                elif it == len(z_vert) - 1:
+                    iright = 0
+                    ileft = it - 1
+                else:
+                    iright = it + 1
+                    ileft = it - 1
+                if z_vert[ileft] == tt_max and z_vert[it] == tt_max and z_vert[iright] == tt_max:
+                    p2.append(it)
+                else:
+                    if z_vert[it] == tt_max:
+                        p1.append(it)
                         p2.append(it)
                     else:
-                        if z_vert[it] == tt_max:
-                            p1.append(it)
-                            p2.append(it)
-                        else:
-                            p1.append(it)
+                        p1.append(it)
 
-                if len(p1) > 2:
-                    n_vert1 = len(p1) + 1
-                    np_verts_p1[:n_vert1 - 1, 0] = x_vert[p1]
-                    np_verts_p1[:n_vert1 - 1, 1] = y_vert[p1]
-                    np_verts_p1[:n_vert1 - 1, 2] = z_vert[p1]
-                    np_verts_p1[n_vert1 - 1, :] = np_verts_p1[0, :]
-                    to_insert.append((rgid, lid, n_vert1,
-                                      *np_verts_p1[0], self.cfg.srid_palm,
-                                      *np_verts_p1[1], self.cfg.srid_palm,
-                                      *np_verts_p1[2], self.cfg.srid_palm,
-                                      *np_verts_p1[3], self.cfg.srid_palm,
-                                      *np_verts_p1[4], self.cfg.srid_palm,
-                                      *np_verts_p1[5], self.cfg.srid_palm,
-                                      *np_verts_p1[6], self.cfg.srid_palm))
-                if len(p2) > 2:
-                    n_vert2 = len(p2) + 1
-                    np_verts_p2[:n_vert2 - 1, 0] = x_vert[p2]
-                    np_verts_p2[:n_vert2 - 1, 1] = y_vert[p2]
-                    np_verts_p2[:n_vert2 - 1, 2] = z_vert[p2]
-                    np_verts_p2[n_vert2 - 1, :] = np_verts_p2[0, :]
-                    to_insert.append((rgid, lid, n_vert2,
-                                      *np_verts_p2[0], self.cfg.srid_palm,
-                                      *np_verts_p2[1], self.cfg.srid_palm,
-                                      *np_verts_p2[2], self.cfg.srid_palm,
-                                      *np_verts_p2[3], self.cfg.srid_palm,
-                                      *np_verts_p2[4], self.cfg.srid_palm,
-                                      *np_verts_p2[5], self.cfg.srid_palm,
-                                      *np_verts_p2[6], self.cfg.srid_palm))
-                if len(p2) > 2 or len(p1) > 2:
-                    to_delete.append((rgid,))
+            if len(p1) > 2:
+                n_vert1 = len(p1) + 1
+                np_verts_p1[:n_vert1 - 1, 0] = x_vert[p1]
+                np_verts_p1[:n_vert1 - 1, 1] = y_vert[p1]
+                np_verts_p1[:n_vert1 - 1, 2] = z_vert[p1]
+                np_verts_p1[n_vert1 - 1, :] = np_verts_p1[0, :]
+                to_insert.append((rgid, lid, n_vert1,
+                                  *np_verts_p1[0], self.cfg.srid_palm,
+                                  *np_verts_p1[1], self.cfg.srid_palm,
+                                  *np_verts_p1[2], self.cfg.srid_palm,
+                                  *np_verts_p1[3], self.cfg.srid_palm,
+                                  *np_verts_p1[4], self.cfg.srid_palm,
+                                  *np_verts_p1[5], self.cfg.srid_palm,
+                                  *np_verts_p1[6], self.cfg.srid_palm))
+            if len(p2) > 2:
+                n_vert2 = len(p2) + 1
+                np_verts_p2[:n_vert2 - 1, 0] = x_vert[p2]
+                np_verts_p2[:n_vert2 - 1, 1] = y_vert[p2]
+                np_verts_p2[:n_vert2 - 1, 2] = z_vert[p2]
+                np_verts_p2[n_vert2 - 1, :] = np_verts_p2[0, :]
+                to_insert.append((rgid, lid, n_vert2,
+                                  *np_verts_p2[0], self.cfg.srid_palm,
+                                  *np_verts_p2[1], self.cfg.srid_palm,
+                                  *np_verts_p2[2], self.cfg.srid_palm,
+                                  *np_verts_p2[3], self.cfg.srid_palm,
+                                  *np_verts_p2[4], self.cfg.srid_palm,
+                                  *np_verts_p2[5], self.cfg.srid_palm,
+                                  *np_verts_p2[6], self.cfg.srid_palm))
+            if len(p2) > 2 or len(p1) > 2:
+                to_delete.append((rgid,))
 
-            debug('deleting all unwanted rows')
-            sqltext = f'delete from "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_terrain_gridded}" where rgid = any(%s)'
-            self.execute(sqltext, (to_delete,))
+        debug('deleting all unwanted rows')
+        sqltext = f'delete from "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_terrain_gridded}" where rgid = any(%s)'
+        self.execute(sqltext, (to_delete,))
 
-            debug('inserting all new entries into slanted faces table')
-            sqltext = f"""
-                insert into "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_terrain_gridded}" 
-                (id, rgid, lid, n_vert, vert1, vert2, vert3, vert4, vert5, vert6, vert7) 
-                values (null, %s, %s, %s, 
-                        st_setsrid(st_makepoint(%s, %s, %s), %s), 
-                        st_setsrid(st_makepoint(%s, %s, %s), %s), 
-                        st_setsrid(st_makepoint(%s, %s, %s), %s), 
-                        st_setsrid(st_makepoint(%s, %s, %s), %s), 
-                        st_setsrid(st_makepoint(%s, %s, %s), %s), 
-                        st_setsrid(st_makepoint(%s, %s, %s), %s), 
-                        st_setsrid(st_makepoint(%s, %s, %s), %s) 
-                )
-            """
-            self.execute_batch(sqltext, to_insert)
+        debug('inserting all new entries into slanted faces table')
+        sqltext = f"""
+            insert into "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_terrain_gridded}" 
+            (id, rgid, lid, n_vert, vert1, vert2, vert3, vert4, vert5, vert6, vert7) 
+            values (null, %s, %s, %s, 
+                    st_setsrid(st_makepoint(%s, %s, %s), %s), 
+                    st_setsrid(st_makepoint(%s, %s, %s), %s), 
+                    st_setsrid(st_makepoint(%s, %s, %s), %s), 
+                    st_setsrid(st_makepoint(%s, %s, %s), %s), 
+                    st_setsrid(st_makepoint(%s, %s, %s), %s), 
+                    st_setsrid(st_makepoint(%s, %s, %s), %s), 
+                    st_setsrid(st_makepoint(%s, %s, %s), %s) 
+            )
+        """
+        self.execute_batch(sqltext, to_insert)
 
-            debug('updating 3d polygon')
-            sqltext = f"""
-                update "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_terrain_gridded}" set geom =  
-                st_forcerhr(
-                st_setsrid(st_makepolygon(st_makeline(array[vert1, vert2, vert3, vert4, vert5, vert6, vert7,
-                     case when vert1 is not null then vert1 
-                          when vert2 is not null then vert2 
-                          when vert3 is not null then vert3 
-                          when vert4 is not null then vert4 
-                          when vert5 is not null then vert5 
-                          when vert6 is not null then vert6 
-                          when vert7 is not null then vert7 end
-                ])), %s)) 
-                where geom is null
-            """
-            self.execute(sqltext, (self.cfg.srid_palm,))
+        debug('updating 3d polygon')
+        sqltext = f"""
+            update "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_terrain_gridded}" set geom =  
+            st_forcerhr(
+            st_setsrid(st_makepolygon(st_makeline(array[vert1, vert2, vert3, vert4, vert5, vert6, vert7,
+                 case when vert1 is not null then vert1 
+                      when vert2 is not null then vert2 
+                      when vert3 is not null then vert3 
+                      when vert4 is not null then vert4 
+                      when vert5 is not null then vert5 
+                      when vert6 is not null then vert6 
+                      when vert7 is not null then vert7 end
+            ])), %s)) 
+            where geom is null
+        """
+        self.execute(sqltext, (self.cfg.srid_palm,))
 
         # TODO: create new serial index
         self.execute(f"""
@@ -4053,120 +4018,105 @@ class CctProcessing(BaseTask):
             length normalized lenght between inside point and slanted face vertex
         """
         progress('creating new coordinates of the slanted faces')
+        schema, table = self.cfg.domain.case_schema, self.cfg.tables.slanted_faces
+        ox, oy = self.cfg.domain.origin_x, self.cfg.domain.origin_y
+        dx, dy, dz = self.cfg.domain.dx, self.cfg.domain.dy, self.cfg.domain.dz
+
+        # One update writes all seven vertices. It used to be eight full-table
+        # updates per vertex (56 rewrites of the widest table of the case); the
+        # expressions are the same, chained through laterals in the order the
+        # updates ran, so the stored values are identical (offset 0 keeps each
+        # step a subquery of its own: the planner would otherwise inline every
+        # step into each reference to it and evaluate the chain many times):
+        #  - the vertex normal from the adjacent vertices (left, middle, right)
+        #    for land/roof faces, the closing vertex copies the first one, walls
+        #    take the face normal;
+        #  - ii, jj, kk of the grid line the vertex sits on, the line flags, the
+        #    direction to the solid side, the corner shift and the length.
+        # (in the column order the per-vertex statements created them)
+        debug('adding the vertex coordinate columns')
+        self.execute(f'alter table "{schema}"."{table}" ' + ', '.join(
+            f'add column if not exists ii{ni} integer, add column if not exists jj{ni} integer, '
+            f'add column if not exists kk{ni} integer, add column if not exists dir{ni} integer, '
+            f'add column if not exists len{ni} double precision, '
+            + ('add column if not exists iline boolean, add column if not exists jline boolean, '
+               'add column if not exists kline boolean, ' if ni == 1 else '')
+            + f'add column if not exists nx{ni}_l double precision, add column if not exists ny{ni}_l double precision, '
+            f'add column if not exists nz{ni}_l double precision' for ni in range(1, 8)))
+
+        laterals, targets, values = [], [], []
         for ni in range(1, 8):
             # define indices for adjacent vertices
             ni_p = min(ni + 1, 7)
             ni_m = max(ni - 1, 1)
+            l, m, r = f'v{ni}.vert_l', f'v{ni}.vert_m', f'v{ni}.vert_r'
+            laterals.append(f"""
+                lateral (select s.vert{ni} as vert_m,
+                    case when ({ni} + 1) < s.n_vert then s.vert{ni_p} else s.vert1 end as vert_r,
+                    case when ({ni} - 1) > 0 then s.vert{ni_m} else
+                         case when s.n_vert = 4 then s.vert3 when s.n_vert = 5 then s.vert4 when s.n_vert = 6 then s.vert5 when s.n_vert = 7 then s.vert6 end
+                    end as vert_l offset 0) as v{ni}""")
+            laterals.append(f"""
+                lateral (select
+                    case when {ni} < s.n_vert then ((st_y({l})-st_y({m}))*(st_z({r})-st_z({m})) - (st_z({l})-st_z({m}))*(st_y({r})-st_y({m})))
+                      else null end as x,
+                    case when {ni} < s.n_vert then ((st_z({l})-st_z({m}))*(st_x({r})-st_x({m})) - (st_x({l})-st_x({m}))*(st_z({r})-st_z({m})))
+                      else null end as y,
+                    case when {ni} < s.n_vert then ((st_x({l})-st_x({m}))*(st_y({r})-st_y({m})) - (st_y({l})-st_y({m}))*(st_x({r})-st_x({m})))
+                      else null end as z offset 0) as c{ni}""")
+            # walls take the face normal, the closing vertex the first vertex
+            # normal, land/roof faces the triangle normal; nothing else is set
+            closing = '' if ni == 1 else f'when {ni} = s.n_vert then n1.{{0}} '
+            laterals.append(f"""
+                lateral (select """ + ', '.join(
+                f'case when s.iswall then s.norm{a} {closing.format(a)}when not s.iswall then c{ni}.{a} '
+                f'else s.n{a}{ni}_l end as {a}' for a in 'xyz') + f' offset 0) as n{ni}')
+            laterals.append(f"""
+                lateral (select
+                    floor((st_x(s.vert{ni}) - {ox}) / {dx})::integer as ii,
+                    floor((st_y(s.vert{ni}) - {oy}) / {dy})::integer as jj,
+                    floor(st_z(s.vert{ni}) / {dz})::integer as kk offset 0) as a{ni}""")
+            laterals.append(f"""
+                lateral (select
+                    case when abs(st_x(s.vert{ni}) - a{ni}.ii * {dx} - {ox}) > 1e-8 then true else false end as iline,
+                    case when abs(st_y(s.vert{ni}) - a{ni}.jj * {dy} - {oy}) > 1e-8 then true else false end as jline,
+                    case when abs(st_z(s.vert{ni}) - a{ni}.kk * {dz}) > 1e-8 then true else false end as kline offset 0) as f{ni}""")
+            laterals.append(f"""
+                lateral (select
+                    case when f{ni}.iline then case when n{ni}.x > 0.0 then 4
+                                                    when n{ni}.x < 0.0 then 5
+                                                    else 6 end
+                         when f{ni}.jline then case when n{ni}.y > 0.0 then 2
+                                                    when n{ni}.y < 0.0 then 3
+                                                    else 6 end
+                         when f{ni}.kline then case when n{ni}.z > 0.0 then 0
+                                                    when n{ni}.z < 0.0 then 1
+                                                    else 6 end
+                         else 6 end as dir offset 0) as d{ni}""")
+            laterals.append(f"""
+                lateral (select
+                    case when d{ni}.dir = 5 then a{ni}.ii+1 else a{ni}.ii end as ii,
+                    case when d{ni}.dir = 3 then a{ni}.jj+1 else a{ni}.jj end as jj,
+                    case when d{ni}.dir = 1 then a{ni}.kk+1 else a{ni}.kk end as kk offset 0) as b{ni}""")
+            laterals.append(f"""
+                lateral (select sqrt(
+                     ((st_x(s.vert{ni}) - {ox} - b{ni}.ii * {dx}) / {dx} ) ^ 2 +
+                     ((st_y(s.vert{ni}) - {oy} - b{ni}.jj * {dy}) / {dy} ) ^ 2 +
+                     ((st_z(s.vert{ni})       - b{ni}.kk * {dz}) / {dz} ) ^ 2
+                     ) as len offset 0) as e{ni}""")
+            targets += [f'ii{ni}', f'jj{ni}', f'kk{ni}', f'dir{ni}', f'len{ni}', f'nx{ni}_l', f'ny{ni}_l', f'nz{ni}_l']
+            values += [f'b{ni}.ii', f'b{ni}.jj', f'b{ni}.kk', f'd{ni}.dir', f'e{ni}.len', f'n{ni}.x', f'n{ni}.y', f'n{ni}.z']
+        # the line flags are shared columns, the last vertex wrote them
+        targets += ['iline', 'jline', 'kline']
+        values += ['f7.iline', 'f7.jline', 'f7.kline']
 
-            debug('processing {}. coordinates', ni)
-            verbose('\tadding new columns')
-
-            sqltext = f"""
-                alter table "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_faces}" 
-                add column if not exists ii{ni} integer, 
-                add column if not exists jj{ni} integer, 
-                add column if not exists kk{ni} integer, 
-                add column if not exists dir{ni} integer, 
-                add column if not exists len{ni} double precision, 
-                add column if not exists iline boolean, 
-                add column if not exists jline boolean, 
-                add column if not exists kline boolean,
-                add column if not exists nx{ni}_l double precision, 
-                add column if not exists ny{ni}_l double precision, 
-                add column if not exists nz{ni}_l double precision
-            """
-            self.execute(sqltext)
-
-            debug('calculate for each vertex its own normal vector from adjacent vertices')
-            sqltext = f"""
-                with c as ( 
-                   select 
-                       vert{ni} as vert_m, 
-                       case when ({ni} + 1) < n_vert then vert{ni_p} else vert1 end as vert_r, 
-                       case when ({ni} - 1) > 0 then vert{ni_m} else 
-                            case when n_vert = 4 then vert3 when n_vert = 5 then vert4 when n_vert = 6 then vert5 when n_vert = 7 then vert6 end 
-                       end as vert_l, 
-                       id 
-                    from "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_faces}"
-                ) 
-                update "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_faces}" as s set ( nx{ni}_l, ny{ni}_l, nz{ni}_l ) = 
-                (case when {ni} < n_vert then ((st_y(vert_l)-st_y(vert_m))*(st_z(vert_r)-st_z(vert_m)) - (st_z(vert_l)-st_z(vert_m))*(st_y(vert_r)-st_y(vert_m)))
-                  else null end, 
-                 case when {ni} < n_vert then ((st_z(vert_l)-st_z(vert_m))*(st_x(vert_r)-st_x(vert_m)) - (st_x(vert_l)-st_x(vert_m))*(st_z(vert_r)-st_z(vert_m)))
-                  else null end, 
-                 case when {ni} < n_vert then ((st_x(vert_l)-st_x(vert_m))*(st_y(vert_r)-st_y(vert_m)) - (st_y(vert_l)-st_y(vert_m))*(st_x(vert_r)-st_x(vert_m)))
-                  else null end) 
-                from c where c.id = s.id and not iswall
-            """
-            self.execute(sqltext)
-
-            sqltext = f"""
-                update "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_faces}" as s set ( nx{ni}_l, ny{ni}_l, nz{ni}_l ) = 
-                (nx1_l, ny1_l, nz1_l) 
-                where {ni} = n_vert
-            """
-            self.execute(sqltext)
-
-            sqltext = f"""
-                update "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_faces}" as s set ( nx{ni}_l, ny{ni}_l, nz{ni}_l ) = 
-                (normx, normy, normz) 
-                where iswall
-            """
-            self.execute(sqltext)
-
-            verbose('\tupdating ii, jj, kk')
-            sqltext = f"""
-                update "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_faces}" set 
-                ii{ni} = floor((st_x(vert{ni}) - {self.cfg.domain.origin_x}) / {self.cfg.domain.dx}), 
-                jj{ni} = floor((st_y(vert{ni}) - {self.cfg.domain.origin_y}) / {self.cfg.domain.dy}), 
-                kk{ni} = floor(st_z(vert{ni}) / {self.cfg.domain.dz})
-            """
-            self.execute(sqltext)
-
-            verbose('\tupdating iline, jline, kline')
-            sqltext = f"""
-                update "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_faces}" set 
-                iline = case when abs(st_x(vert{ni}) - ii{ni} * {self.cfg.domain.dx} - {self.cfg.domain.origin_x}) > 1e-8 then true else false end, 
-                jline = case when abs(st_y(vert{ni}) - jj{ni} * {self.cfg.domain.dy} - {self.cfg.domain.origin_y}) > 1e-8 then true else false end, 
-                kline = case when abs(st_z(vert{ni}) - kk{ni} * {self.cfg.domain.dz}) > 1e-8 then true else false end
-            """
-            self.execute(sqltext)
-
-            verbose('\tupdating dir')
-            sqltext = f"""
-                update "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_faces}" set dir{ni} = 
-                case when iline then case when nx{ni}_l > 0.0 then 4 
-                                          when nx{ni}_l < 0.0 then 5 
-                                          else 6 end 
-                     when jline then case when ny{ni}_l > 0.0 then 2 
-                                          when ny{ni}_l < 0.0 then 3
-                                          else 6 end 
-                     when kline then case when nz{ni}_l > 0.0 then 0 
-                                          when nz{ni}_l < 0.0 then 1 
-                                          else 6 end 
-                     else 6 end
-            """
-            self.execute(sqltext)
-
-            verbose('\tupdating ii,jj,kk')
-            sqltext = f"""
-                update "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_faces}" set 
-                ii{ni} = case when dir{ni} = 5 then ii{ni}+1 else ii{ni} end, 
-                jj{ni} = case when dir{ni} = 3 then jj{ni}+1 else jj{ni} end, 
-                kk{ni} = case when dir{ni} = 1 then kk{ni}+1 else kk{ni} end
-            """
-            self.execute(sqltext)
-
-            verbose('\tupdating len')
-            sqltext = f"""
-                update "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_faces}" set len{ni} = 
-                sqrt(
-                     ((st_x(vert{ni}) - {self.cfg.domain.origin_x} - ii{ni} * {self.cfg.domain.dx}) / {self.cfg.domain.dx} ) ^ 2 + 
-                     ((st_y(vert{ni}) - {self.cfg.domain.origin_y} - jj{ni} * {self.cfg.domain.dy}) / {self.cfg.domain.dy} ) ^ 2 + 
-                     ((st_z(vert{ni})       - kk{ni} * {self.cfg.domain.dz}) / {self.cfg.domain.dz} ) ^ 2
-                     )
-            """
-            self.execute(sqltext)
+        debug('calculating the integer coordinates of all vertices')
+        self.execute(f"""
+            update "{schema}"."{table}" as s set ({', '.join(targets)}) = (
+                select {', '.join(values)}
+                from (select 1) as one cross join {' cross join '.join(laterals)}
+            )
+        """)
             # 'case when dir{2} = 1 then (st_x(vert{2}) - {6} - ii{2} * {3}) / {3} ' \
             # '     when dir{2} = 0 then (st_x(vert{2}) - {6} - ii{2} * {3}) / {3}' \
             # '     when dir{2} = 3 then (st_y(vert{2}) - {7} - jj{2} * {4}) / {4} ' \
@@ -4884,12 +4834,12 @@ class CctProcessing(BaseTask):
             create_slanted_vtk(self.db, self.cfg)
 
         # final touch: remove the closing vertex (repeats the first one)
+        # (one update: n_vert - 1 is the decreased count the per-vertex
+        # updates used to test)
         debug('removing extra vertex')
-        self.execute(f'update "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_faces}" set n_vert = n_vert - 1')
-        for iv in range(1, 8):
-            verbose(f'removing extra vertices, {iv}')
-            self.execute(f'update "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_faces}" '
-                         f'set vert{iv}i = null where n_vert < {iv}')
+        self.execute(f'update "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_faces}" '
+                     f'set n_vert = n_vert - 1, ' + ', '.join(
+                         f'vert{iv}i = case when n_vert - 1 < {iv} then null else vert{iv}i end' for iv in range(1, 8)))
 
         self.execute(f'comment on table "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_faces}" '
                      f"is '{self.CCT_DONE_MARK}'")

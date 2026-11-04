@@ -5,6 +5,7 @@ import pandas as pd
 from .base import BaseTask
 from src.logger import debug, progress, verbose, warning, error, sql_debug, sql_verbose, extra_verbose
 from src.utils.capabilities import build_impervious_correction
+from src.utils.attributes import standardize_columns
 
 class InitializeDomainTask(BaseTask):
     def run(self):
@@ -269,6 +270,11 @@ class InitializeDomainTask(BaseTask):
                 continue
 
             vtabs.append(rel)
+
+            # standard column names: gis_import already renamed them in the
+            # input schema, but an input schema imported by PALM-GeM 1.x still
+            # has the legacy names (1.x renamed only in the case schema)
+            standardize_columns(self.cfg, self.db, self.cfg.domain.case_schema, rel)
 
             # spatial index
             self.execute(
@@ -1625,6 +1631,18 @@ class InitializeDomainTask(BaseTask):
         area_limit = self.cfg.small_buildings_area * (self.cfg.domain.dx ** 2)
         schema, landcover = self.cfg.domain.case_schema, self.cfg.tables.landcover
         tr = self.cfg.type_range
+
+        # same replacement as force_building_boundary: on lod2 the catland code
+        # must follow the type, or the cropped polygon keeps a building material
+        sets = ['type = 202']
+        if self.cfg.lod2:
+            sets.append('catland = 32')
+            optional = self._landcover_optional_columns()
+            if 'albedo' in optional:
+                sets.append('albedo = 0.1')
+            if 'emissivity' in optional:
+                sets.append('emissivity = 0.93')
+
         sql_small = f"""
             with clusters as (
                 select (st_dump(st_union(geom))).geom as geom
@@ -1639,11 +1657,13 @@ class InitializeDomainTask(BaseTask):
                 where st_area(c.geom) < %s
             )
             update "{schema}"."{landcover}" as l
-            set type = 202
+            set {", ".join(sets)}
             from small s
             where l.lid = s.lid
+            returning l.lid
         """
-        self.execute(sql_small, (area_limit,))
+        cropped = self.execute(sql_small, (area_limit,)) or []
+        progress(f'cropped {len(cropped)} building polygon(s) in clusters smaller than {area_limit} m2')
 
     def _fill_default_building_heights(self):
         """ fill buildings grid where height is missing (null or 0) with values
@@ -3074,6 +3094,11 @@ class InitializeDomainTask(BaseTask):
         self.connect_landcover_grid()
 
         self.force_building_boundary()
+
+        # after the boundary removal, as in 1.x; must run before the CCT outer
+        # walls are built from the landcover (process_usm), otherwise a polygon
+        # too small to get building cells still gets walls without a building
+        self.crop_small_buildings()
 
         self.fill_cortyard()
 

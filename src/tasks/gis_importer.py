@@ -1,6 +1,7 @@
 # src/tasks/prepare.py
 from .base import BaseTask
 from src.utils.linux_cmds import ShapefileImporter, RasterImporter
+from src.utils.attributes import standardize_columns
 from src.logger import progress, debug, warning, verbose, error
 import os
 import pandas as pd
@@ -132,70 +133,4 @@ class GisImporter(BaseTask):
         tables that are being imported, so level-of-detail
         tables that are simply absent never trigger a failure.
         """
-        progress('standardizing table columns (source names -> standard names)')
-
-        mapping = self.cfg.attribute_mapping
-        spec = self.cfg.get('attribute_spec', None)
-
-        # iterate by logical table name (landcover, walls, ...) and resolve to
-        # the actual table name via the tables: section.
-        for table_key in mapping._settings.keys():
-            actual_table = self.cfg.tables.get(table_key, table_key)
-            if not actual_table == table_name:
-                debug(f'skipping {table_key}: not among imported tables')
-                continue
-
-            debug(f'checking table: {actual_table}')
-
-            # necessary attributes for this table (everything else is soft)
-            necessary = []
-            if spec is not None and table_key in spec._settings:
-                necessary = spec._settings[table_key].get('necessary', []) or []
-
-            # fetch existing columns once to avoid repeated information_schema queries
-            sql_cols = """
-                select column_name
-                from information_schema.columns
-                where table_schema = %s and table_name = %s
-            """
-            res = self.execute(sql_cols, (self.cfg.input_schema, actual_table))
-            existing_cols = [r[0] for r in res]
-
-            table_map = mapping._settings[table_key]
-            for standard_name, source_name in table_map._settings.items():
-                # already standardized -> nothing to do
-                if standard_name in existing_cols:
-                    continue
-
-                if source_name in existing_cols:
-                    verbose(f'renaming column in {actual_table}: {source_name} -> {standard_name}')
-                    sql_rename = f"""
-                        alter table "{self.cfg.input_schema}"."{actual_table}"
-                        rename column {source_name} to {standard_name}
-                    """
-                    try:
-                        self.execute(sql_rename)
-                        existing_cols.remove(source_name)
-                        existing_cols.append(standard_name)
-                    except Exception as e:
-                        # a failed rename of a necessary attribute is fatal
-                        if standard_name in necessary:
-                            error(f'failed to rename necessary attribute {source_name} -> '
-                                  f'{standard_name} in {actual_table}: {e}')
-                            raise
-                        error(f'failed to rename {source_name} -> {standard_name} in {actual_table}: {e}')
-                    continue
-
-                # neither standard nor source column present
-                if standard_name in necessary:
-                    msg = (f"required attribute '{standard_name}' not found in table "
-                           f"'{actual_table}' (looked for source column '{source_name}'). "
-                           f"Set attribute_mapping.{table_key}.{standard_name} to the "
-                           f"matching column name in your data.")
-                    error(msg)
-                    raise ValueError(msg)
-                else:
-                    warning(f"optional attribute '{standard_name}' not found in table "
-                            f"'{actual_table}' (source column '{source_name}'); skipping")
-
-        progress('column standardization complete')
+        standardize_columns(self.cfg, self.db, self.cfg.input_schema, table_name)

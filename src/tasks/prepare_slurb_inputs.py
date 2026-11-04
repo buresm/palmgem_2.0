@@ -51,6 +51,20 @@ class PrepareSlurbInputs(BaseTask):
             error(msg)
             raise ValueError(msg)
 
+        # create_centerlines labels the new centerlines with cfg.srid (the
+        # coordinates come from the landcover, but the SRID is lost on the way
+        # through shapely). A landcover in another SRID would give centerlines
+        # with the right coordinates but the wrong SRID, and the canyon step
+        # fails much later with "Operation on mixed SRID geometries".
+        sql_srid = f'select st_srid(geom) from "{schema}"."{self.cfg.tables.landcover}" limit 1'
+        srid_landcover = self.fetchone(sql_srid)
+        if srid_landcover != self.cfg.srid:
+            msg = (f'"{schema}"."{self.cfg.tables.landcover}" is in EPSG:{srid_landcover} but the '
+                   f'configured srid is {self.cfg.srid}; set srid, srid_input, srid_palm and '
+                   f'srid_utm in the config to the srid of the input data (e.g. {srid_landcover})')
+            error(msg)
+            raise ValueError(msg)
+
     def create_centerlines(self):
         progress('creating centerline from landcover')
 

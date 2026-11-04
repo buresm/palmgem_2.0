@@ -3315,87 +3315,79 @@ class CCTDriverGen(CctProcessing, StaticDriverGen):
                   'add column if not exists area7 double precision'
         self.execute(sqltext, (self.cfg.srid_palm,))
 
+        # One update computes the triangle normals and areas and runs the
+        # normal vector steps in their original order (each was a full-table
+        # update of its own: zero-area faces point up, the area-weighted mean,
+        # the wall normals, zero vectors point up, vertical faces get normz = 0,
+        # normalisation, the normal point and line); same expressions, so the
+        # stored values are identical (offset 0 keeps each step a subquery of
+        # its own, so the planner does not inline the chain into every reference).
+        laterals = []
         for ni in range(1, 7):
-            debug(f'trinagulating normal vector, {ni}')
             nxt = ni + 1
-            sqltext = f'update "{schema}"."{table}" set (n{ni}x, n{ni}y, n{ni}z) = (' \
-                      f'case when {ni} < n_vert then ((st_y(vert{nxt})-st_y(center))*(st_z(vert{ni})-st_z(center)) - (st_z(vert{nxt})-st_z(center))*(st_y(vert{ni})-st_y(center))) ' \
-                      'else null end, ' \
-                      f'case when {ni} < n_vert then ((st_z(vert{nxt})-st_z(center))*(st_x(vert{ni})-st_x(center)) - (st_x(vert{nxt})-st_x(center))*(st_z(vert{ni})-st_z(center))) ' \
-                      'else null end, ' \
-                      f'case when {ni} < n_vert then ((st_x(vert{nxt})-st_x(center))*(st_y(vert{ni})-st_y(center)) - (st_y(vert{nxt})-st_y(center))*(st_x(vert{ni})-st_x(center))) ' \
-                      'else null end ' \
-                      ')'
-            self.execute(sqltext)
-
-            sqltext = f'update "{schema}"."{table}" set area{ni} = ' \
-                      f'case when {ni} < n_vert then sqrt((n{ni}x)^2 + (n{ni}y)^2 + (n{ni}z)^2) / 2.0 ' \
-                      'else null end'
-            self.execute(sqltext)
-
-        # get overall area
-        debug('calculation of overall face area')
-        sqltext = f'update "{schema}"."{table}" set ' \
-                  'area = area1 + coalesce(area2, 0.0) + coalesce(area3, 0.0) + coalesce(area4, 0.0) + ' \
-                  '               coalesce(area5, 0.0) + coalesce(area6, 0.0) + coalesce(area7, 0.0)'
-        self.execute(sqltext)
-
-        # get average normal vector
-        debug('normal vector for faces with zero area')
-        sqltext = f'update "{schema}"."{table}" set normx = 0, normy = 0, normz = 1 where area = 0.0 and norm is null'
-        self.execute(sqltext)
-
-        debug('calculating average unit normal vector')
-        sqltext = f'update "{schema}"."{table}" set ' \
-                  'normx = (n1x*area1 + coalesce(n2x, 0.0)*coalesce(area2, 0.0) + coalesce(n3x, 0.0)*coalesce(area3, 0.0) + ' \
-                  '         coalesce(n4x, 0.0)*coalesce(area4, 0.0) + coalesce(n5x, 0.0)*coalesce(area5, 0.0) + ' \
-                  '         coalesce(n6x, 0.0)*coalesce(area6, 0.0) + coalesce(n7x, 0.0)*coalesce(area7, 0.0))/area, ' \
-                  'normy = (n1y*area1 + coalesce(n2y, 0.0)*coalesce(area2, 0.0) + coalesce(n3y, 0.0)*coalesce(area3, 0.0) + ' \
-                  '         coalesce(n4y, 0.0)*coalesce(area4, 0.0) + coalesce(n5y, 0.0)*coalesce(area5, 0.0) + ' \
-                  '         coalesce(n6y, 0.0)*coalesce(area6, 0.0) + coalesce(n7y, 0.0)*coalesce(area7, 0.0))/area, ' \
-                  'normz = (n1z*area1 + coalesce(n2z, 0.0)*coalesce(area2, 0.0) + coalesce(n3z, 0.0)*coalesce(area3, 0.0) + ' \
-                  '         coalesce(n4z, 0.0)*coalesce(area4, 0.0) + coalesce(n5z, 0.0)*coalesce(area5, 0.0) + ' \
-                  '         coalesce(n6z, 0.0)*coalesce(area6, 0.0) + coalesce(n7z, 0.0)*coalesce(area7, 0.0))/area ' \
-                  'where norm is null and area > 0.0'
-        self.execute(sqltext)
-
-        verbose('calculate normals from vertical walls norm')
-        sqltext = f'update "{schema}"."{table}" set ' \
-                  'normx = st_x(norm) - st_x(center), ' \
-                  'normy = st_y(norm) - st_y(center), ' \
-                  'normz = st_z(norm) - st_z(center) ' \
-                  'where norm is not null'
-        self.execute(sqltext)
-
-        debug('normal vector for faces with zero area')
-        sqltext = f'update "{schema}"."{table}" set normx = 0, normy = 0, normz = 1 ' \
-                  'where norm is null and normx^2 + normy^2 + normz^2 = 0'
-        self.execute(sqltext)
-
-        verbose('correct normal vector, z component for vertical faces')
-        sqltext = f'update "{schema}"."{table}" set normz = 0.0 ' \
-                  'where abs(normz/area) < 1e-8 and area > 0.0'
-        self.execute(sqltext)
-
+            laterals.append(
+                f'lateral (select '
+                f'case when {ni} < s.n_vert then ((st_y(s.vert{nxt})-st_y(s.center))*(st_z(s.vert{ni})-st_z(s.center)) - (st_z(s.vert{nxt})-st_z(s.center))*(st_y(s.vert{ni})-st_y(s.center))) '
+                'else null end as x, '
+                f'case when {ni} < s.n_vert then ((st_z(s.vert{nxt})-st_z(s.center))*(st_x(s.vert{ni})-st_x(s.center)) - (st_x(s.vert{nxt})-st_x(s.center))*(st_z(s.vert{ni})-st_z(s.center))) '
+                'else null end as y, '
+                f'case when {ni} < s.n_vert then ((st_x(s.vert{nxt})-st_x(s.center))*(st_y(s.vert{ni})-st_y(s.center)) - (st_y(s.vert{nxt})-st_y(s.center))*(st_x(s.vert{ni})-st_x(s.center))) '
+                f'else null end as z offset 0) as t{ni}')
+            laterals.append(
+                f'lateral (select case when {ni} < s.n_vert then sqrt((t{ni}.x)^2 + (t{ni}.y)^2 + (t{ni}.z)^2) / 2.0 '
+                f'else null end as area offset 0) as a{ni}')
+        # overall face area
+        laterals.append(
+            'lateral (select a1.area + coalesce(a2.area, 0.0) + coalesce(a3.area, 0.0) + coalesce(a4.area, 0.0) + '
+            '                coalesce(a5.area, 0.0) + coalesce(a6.area, 0.0) + coalesce(s.area7, 0.0) as area offset 0) as ar')
+        # normal vector for faces with zero area
+        laterals.append(
+            'lateral (select case when ar.area = 0.0 and s.norm is null then 0 else s.normx end as x, '
+            '                case when ar.area = 0.0 and s.norm is null then 0 else s.normy end as y, '
+            '                case when ar.area = 0.0 and s.norm is null then 1 else s.normz end as z offset 0) as m1')
+        # average unit normal vector
+        laterals.append('lateral (select ' + ', '.join(
+            f'case when s.norm is null and ar.area > 0.0 then '
+            f'(t1.{a}*a1.area + coalesce(t2.{a}, 0.0)*coalesce(a2.area, 0.0) + coalesce(t3.{a}, 0.0)*coalesce(a3.area, 0.0) + '
+            f' coalesce(t4.{a}, 0.0)*coalesce(a4.area, 0.0) + coalesce(t5.{a}, 0.0)*coalesce(a5.area, 0.0) + '
+            f' coalesce(t6.{a}, 0.0)*coalesce(a6.area, 0.0) + coalesce(s.n7{a}, 0.0)*coalesce(s.area7, 0.0))/ar.area '
+            f'else m1.{a} end as {a}' for a in 'xyz') + ' offset 0) as m2')
+        # normals from vertical walls norm
+        laterals.append('lateral (select ' + ', '.join(
+            f'case when s.norm is not null then st_{a}(s.norm) - st_{a}(s.center) else m2.{a} end as {a}'
+            for a in 'xyz') + ' offset 0) as m3')
+        # normal vector for faces with zero area
+        laterals.append(
+            'lateral (select case when s.norm is null and m3.x^2 + m3.y^2 + m3.z^2 = 0 then 0 else m3.x end as x, '
+            '                case when s.norm is null and m3.x^2 + m3.y^2 + m3.z^2 = 0 then 0 else m3.y end as y, '
+            '                case when s.norm is null and m3.x^2 + m3.y^2 + m3.z^2 = 0 then 1 else m3.z end as z offset 0) as m4')
+        # correct normal vector, z component for vertical faces (area > 0.0 is
+        # tested first, so a zero area never reaches the division; the update
+        # applied only where both conditions held)
+        laterals.append(
+            'lateral (select m4.x as x, m4.y as y, '
+            '                case when ar.area > 0.0 and abs(m4.z/ar.area) < 1e-8 then 0.0 else m4.z end as z offset 0) as m5')
         # normalize vector
-        debug('normalizing normal vector')
-        sqltext = f'update "{schema}"."{table}" set ' \
-                  'normx = normx / sqrt(normx^2 + normy^2 + normz^2), ' \
-                  'normy = normy / sqrt(normx^2 + normy^2 + normz^2), ' \
-                  'normz = normz / sqrt(normx^2 + normy^2 + normz^2)'
-        self.execute(sqltext)
+        laterals.append('lateral (select ' + ', '.join(
+            f'm5.{a} / sqrt(m5.x^2 + m5.y^2 + m5.z^2) as {a}' for a in 'xyz') + ' offset 0) as m6')
+        # normal point
+        laterals.append(
+            'lateral (select case when s.norm is null then '
+            'st_setsrid(st_makepoint(st_x(s.center)+m6.x, st_y(s.center)+m6.y, st_z(s.center)+m6.z),%s) '
+            'else s.norm end as norm offset 0) as p')
 
-        # create point and line for normal vector
-        debug('calculation of normal point')
-        sqltext = f'update "{schema}"."{table}" set norm = ' \
-                  'st_setsrid(st_makepoint(st_x(center)+normx, st_y(center)+normy, st_z(center)+normz),%s) ' \
-                  'where norm is null'
-        self.execute(sqltext, (self.cfg.srid_palm,))
+        targets, values = [], []
+        for ni in range(1, 7):
+            targets += [f'n{ni}x', f'n{ni}y', f'n{ni}z', f'area{ni}']
+            values += [f't{ni}.x', f't{ni}.y', f't{ni}.z', f'a{ni}.area']
+        targets += ['area', 'normx', 'normy', 'normz', 'norm', 'norm_line']
+        values += ['ar.area', 'm6.x', 'm6.y', 'm6.z', 'p.norm', 'st_setsrid(st_makeline(s.center, p.norm), %s)']
 
-        debug('calculation of normal line')
-        sqltext = f'update "{schema}"."{table}" set norm_line = ' \
-                  'st_setsrid(st_makeline(center, norm), %s)'
-        self.execute(sqltext, (self.cfg.srid_palm,))
+        debug('calculating face normal vectors and areas')
+        sqltext = f'update "{schema}"."{table}" as s set ({", ".join(targets)}) = (' \
+                  f'select {", ".join(values)} ' \
+                  f'from (select 1) as one cross join {" cross join ".join(laterals)})'
+        self.execute(sqltext, (self.cfg.srid_palm, self.cfg.srid_palm))
 
     def create_vertices_indexes(self):
         """ join all vertices and create back index to faces """
@@ -3432,25 +3424,29 @@ class CCTDriverGen(CctProcessing, StaticDriverGen):
         sqltext = f'create index if not exists vert2_kjidir_idx on "{schema}"."{table_v}" (k,j,i,dir)'
         self.execute(sqltext)
 
-        for i in range(1, 8):
-            verbose(f'creating kjidir {i} index on slanted faces table')
-            sqltext = f'create index if not exists vert2_kjidur_{i}_geom_idx on "{schema}"."{table_f}" (kk{i},jj{i},ii{i},dir{i})'
-            self.execute(sqltext)
-
         verbose('\tadding integer index')
         sqltext = f'create index if not exists index_id on "{schema}"."{table_v}" (id)'
         self.execute(sqltext)
 
         # the shift is part of the key: an edge can be cut twice from the same
         # corner (two points on one grid edge, seen on coarse grids); joining on
-        # corner and direction alone linked such faces to an arbitrary one of them
+        # corner and direction alone linked such faces to an arbitrary one of them.
+        # One update links all seven vertices (one vertex row per description,
+        # looked up through the kjidir index; no match keeps the old value, as
+        # the former per-vertex update-join did)
+        debug('joining vertices n. 1-7')
+        sqltext = f'update "{schema}"."{table_f}" as s set ' + ', '.join(
+            f'vert{i}i = coalesce((select v.id from "{schema}"."{table_v}" as v '
+            f'where s.ii{i} = v.i and s.jj{i} = v.j and s.kk{i} = v.k and s.dir{i} = v.dir and s.len{i} = v.len), '
+            f's.vert{i}i)' for i in range(1, 8))
+        self.execute(sqltext)
+        debug('end joining vertices n. 1-7')
+
+        # the per-vertex description indexes, built once the faces are final
         for i in range(1, 8):
-            debug(f'joining vertices n. {i}')
-            sqltext = f'update "{schema}"."{table_f}" set ' \
-                      f'vert{i}i = v.id from "{schema}"."{table_v}" as v ' \
-                      f'where ii{i} = v.i and jj{i} = v.j and kk{i} = v.k and dir{i} = v.dir and len{i} = v.len'
+            verbose(f'creating kjidir {i} index on slanted faces table')
+            sqltext = f'create index if not exists vert2_kjidur_{i}_geom_idx on "{schema}"."{table_f}" (kk{i},jj{i},ii{i},dir{i})'
             self.execute(sqltext)
-            debug(f'end joining vertices n. {i}')
 
         debug('renewing id column on slanted faces table')
         sqltext = f'alter table "{schema}"."{table_f}" drop column if exists id; ' \
