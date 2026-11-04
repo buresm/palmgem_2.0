@@ -165,6 +165,80 @@ class Database:
                 error("Batch execution failed: {}\nQuery: {}", str(e), query)
                 raise
 
+    def execute_values(self, query, rows, page_size=10000):
+        """
+        Multi-row insert with psycopg2.extras.execute_values: the query holds
+        a single %s for the VALUES list and every page of rows goes out as one
+        statement (execute_batch sends one statement per row). Commits.
+        """
+        if not self.conn:
+            raise RuntimeError("Database connection is not active.")
+
+        with self.conn.cursor() as cur:
+            try:
+                debug("Executing multi-row insert ({} records)...", len(rows))
+                psycopg2.extras.execute_values(cur, query, rows, page_size=page_size)
+                sql_debug(self.conn)
+                self.conn.commit()
+            except Exception as e:
+                self.conn.rollback()
+                error("Multi-row insert failed: {}\nQuery: {}", str(e), query)
+                raise
+
+    def maintenance(self, query):
+        """
+        Runs a statement that PostgreSQL refuses inside a transaction block
+        (VACUUM). The pipeline connection works with autocommit off, so this
+        ends any open transaction, switches the underlying psycopg2 connection
+        to autocommit for the one statement and switches it back.
+        """
+        if not self.conn:
+            raise RuntimeError("Database connection is not active.")
+        # the SQLAlchemy pool proxy does not forward attribute assignment, so
+        # the autocommit switch has to go to the psycopg2 connection itself
+        raw = getattr(self.conn, 'driver_connection', None) or getattr(self.conn, 'dbapi_connection', self.conn)
+        self.conn.commit()
+        old = raw.autocommit
+        raw.autocommit = True
+        try:
+            with raw.cursor() as cur:
+                extra_verbose("maintenance: {}", _sql_trace(query))
+                cur.execute(query)
+                sql_debug(self.conn)
+        except Exception as e:
+            error("SQL maintenance failed: {}\nQuery: {}", str(e), query)
+            raise
+        finally:
+            raw.autocommit = old
+
+    def vacuum_analyze(self, schema, tables=None, full=False):
+        """
+        VACUUM (ANALYZE) the given tables of a schema, or all of its tables
+        when tables is None; tables that do not exist are skipped. full=True
+        runs VACUUM (FULL, ANALYZE), which also gives the space of deleted
+        rows back (rewrites the table; worth it after deleting most rows).
+
+        The pipeline rewrites whole tables many times with UPDATE (grid,
+        buildings_grid, slanted_faces); without a vacuum in between the dead
+        row versions pile up in the tables and their indexes, and tables built
+        in the middle of a step have no planner statistics yet. Autovacuum
+        runs too late for both. Returns the elapsed seconds.
+        """
+        t0 = time.perf_counter()
+        if tables is None:
+            tables = [r[0] for r in self.fetch(
+                "select tablename from pg_tables where schemaname = %s order by tablename", (schema,))]
+        else:
+            tables = [t for t in tables
+                      if self.fetchone("select to_regclass(%s) is not null",
+                                       (f'"{schema}"."{t}"',))]
+        opts = 'full, analyze' if full else 'analyze'
+        for t in tables:
+            self.maintenance(f'vacuum ({opts}) "{schema}"."{t}"')
+        elapsed = time.perf_counter() - t0
+        debug("vacuum analyze of {} table(s) in {} took {:.1f}s", len(tables), schema, elapsed)
+        return elapsed
+
     def set_table_owner(self, schema, table_name):
         """
         Changes the PostgreSQL owner of a specific table.

@@ -2408,6 +2408,12 @@ class SlurbDriverGen(StaticDriverGen):
             self._apply_slurb_window(window_n)
             self.execute(sql_cleanup)
 
+        # grid_slurb started with every domain cell and keeps only the urban
+        # ones (3 % of a 1000x1000 grid on Kopisty); FULL gives the space of
+        # the deleted and rewritten rows back, so the nearest-cell lookups
+        # below do not wade through a table 25x its live size
+        self.vacuum_case_tables(self.cfg.tables.grid_slurb, full=True)
+
         # safety net: PIDS_SLURB does not allow building_plan_area_fraction to
         # exceed urban_fraction
         n_fixed = self.fetchone(
@@ -2442,12 +2448,25 @@ class SlurbDriverGen(StaticDriverGen):
             from grid_type gt where gt.id = gs.id
         """, (self.cfg.type_range.building_min, self.cfg.type_range.building_min,
               self.cfg.type_range.building_max))
+        # fresh statistics for the nearest-cell fill: with stale ones (taken
+        # while the column was all null) the planner drops the KNN index and
+        # sorts the whole table for every cell
+        self.execute(f'analyze "{schema}"."{self.cfg.tables.grid_slurb}"')
         self.execute(f"""
             update "{schema}"."{self.cfg.tables.grid_slurb}" gs
             set building_type = (
-                select gss.building_type from "{schema}"."{self.cfg.tables.grid_slurb}" gss
-                where gss.building_type is not null
-                order by gss.geom <-> gs.geom limit 1)
+                -- all touching cells are at distance 0: break the tie by the
+                -- centre distance, then id, or the pick follows row order.
+                -- The tie-break runs on the index's nearest candidates only:
+                -- extra sort keys on the outer level would turn the KNN index
+                -- scan into a sort of the whole table per cell.
+                select k.building_type from (
+                    select gss.building_type, gss.geom <-> gs.geom as d,
+                           gss.point <-> gs.point as dc, gss.id
+                    from "{schema}"."{self.cfg.tables.grid_slurb}" gss
+                    where gss.building_type is not null
+                    order by gss.geom <-> gs.geom limit 32) k
+                order by k.d, k.dc, k.id limit 1)
             where gs.building_type is null
         """)
 
@@ -2496,13 +2515,20 @@ class SlurbDriverGen(StaticDriverGen):
             f'select count(*) from "{schema}"."{self.cfg.tables.grid_slurb}" '
             f'where street_canyon_aspect_ratio is null')
         if n_missing:
+            # statistics after the canyon update (see the building_type fill)
+            self.execute(f'analyze "{schema}"."{self.cfg.tables.grid_slurb}"')
             self.execute(f"""
                 update "{schema}"."{self.cfg.tables.grid_slurb}" gs
                 set street_canyon_aspect_ratio = (
-                    select gss.street_canyon_aspect_ratio
-                    from "{schema}"."{self.cfg.tables.grid_slurb}" gss
-                    where gss.street_canyon_aspect_ratio is not null
-                    order by gss.geom <-> gs.geom limit 1)
+                    -- deterministic among touching cells (all at distance 0),
+                    -- tie-break on the KNN candidates as for building_type
+                    select k.street_canyon_aspect_ratio from (
+                        select gss.street_canyon_aspect_ratio, gss.geom <-> gs.geom as d,
+                               gss.point <-> gs.point as dc, gss.id
+                        from "{schema}"."{self.cfg.tables.grid_slurb}" gss
+                        where gss.street_canyon_aspect_ratio is not null
+                        order by gss.geom <-> gs.geom limit 32) k
+                    order by k.d, k.dc, k.id limit 1)
                 where gs.street_canyon_aspect_ratio is null
             """)
             verbose(f'{n_missing} urban cell(s) without a canyon sample within '
@@ -2655,16 +2681,37 @@ class SlurbDriverGen(StaticDriverGen):
         frontal_w = np.minimum(box_mean(frontal, n), 0.99)
         height_w = weighted_box_mean(height, plan, n)
 
+        # only the cells that stay SLUrb cells (windowed plan fraction >=
+        # min_plan_area, the test of the cleanup that follows) are written
+        # back; the others are deleted here. Every cell of the domain is still
+        # in grid_slurb (1e6 on a 1000x1000 grid), and only a few percent stay.
+        min_plan = float(self.cfg.min_plan_area)
         params = []
         for jj, ii in zip(*np.nonzero(ids >= 0)):
+            if not plan_w[jj, ii] >= min_plan:
+                continue
             h = height_w[jj, ii]
             params.append((float(plan_w[jj, ii]), float(urban_w[jj, ii]),
                            float(frontal_w[jj, ii]) if frontal_w[jj, ii] > 0 else None,
                            None if np.isnan(h) else float(h), int(ids[jj, ii])))
-        self.execute_batch(
-            f'update "{schema}"."{table}" set building_plan_area_fraction = %s, '
-            f'urban_fraction = %s, building_frontal_area_fraction = %s, '
-            f'building_height = coalesce(%s, building_height) where id = %s', params)
+        # one set-based update instead of one statement per cell. The
+        # fractions go in as numeric, the column type, so the values are the
+        # same as with the per-cell literals.
+        self.execute('drop table if exists slurb_window; '
+                     'create temp table slurb_window (plan numeric, urban numeric, '
+                     'frontal numeric, height double precision, id integer)')
+        if params:
+            self.execute_values('insert into slurb_window (plan, urban, frontal, height, id) values %s', params)
+        self.execute('create index slurb_window_id_idx on slurb_window (id); analyze slurb_window')
+        self.execute(
+            f'delete from "{schema}"."{table}" g '
+            f'where not exists (select 1 from slurb_window w where w.id = g.id)')
+        self.execute(
+            f'update "{schema}"."{table}" g set building_plan_area_fraction = w.plan, '
+            f'urban_fraction = w.urban, building_frontal_area_fraction = w.frontal, '
+            f'building_height = coalesce(w.height, g.building_height) '
+            f'from slurb_window w where w.id = g.id')
+        self.execute('drop table if exists slurb_window')
 
         progress('SLURB morphology averaged over a {}x{} cell reference window ({:.0f} m)',
                  n, n, n * self.cfg.domain.dx)

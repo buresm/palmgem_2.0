@@ -198,6 +198,7 @@
 | **building_min_nz** | 1 | Minimum vertical levels of a building cell; heights below dz/2 would otherwise round to 0 and leave zero-height buildings (0 = plain rounding) |
 | **boundary_fill_1** | True | Raise the outermost row/column of grid cells to the height of their inner neighbour when that neighbour is higher, so no canyon opens onto the domain boundary |
 | **boundary_fill_2** | False | Same as **boundary_fill_1**, for the two outermost rows/columns |
+| **vacuum_analyze** | True | `VACUUM (ANALYZE)` the schema a task wrote after every task, and the heavily rewritten tables inside `initialize_domain` and `cct_processing`. The many whole-table UPDATEs otherwise leave the tables and indexes bloated and freshly built tables without planner statistics (autovacuum comes too late). False = rely on autovacuum |
 | **landcover.surface_fractions** | False | Compute surface fractions per grid cell. They are not written to the driver (not supported by PALM yet) |
 | **landcover.min_fraction** | 0.05 | Minimum fraction of a surface type to be used when **landcover.surface_fractions** is on |
 | **zlib** | False | Option that compresses static driver netcdf file |
@@ -549,6 +550,8 @@ Settings in `config/default_slurb.yaml`; enable with `slurb: True` and run `prep
 |:------------------|:---------------|:---------------|
 | **slurb** | False | Produce a SLURB driver and treat building cells as SLUrb cells in the static driver |
 | **min_plan_area** | 0.2 | Building plan fraction from which a cell is a SLUrb cell; below it the cell stays pure LSM. With a reference window it is applied to the windowed fraction, identically in the static and SLURB drivers |
+| **slurb_clip_margin** | 300.0 | m; `prepare_slurb` processes only the domain plus this margin: street polygons are cut to the box, buildings and building-height raster tiles touching it are taken whole. Keep it above the canyon probe (50 m) + `canyon_search_radius`. 0 = the whole input schema (slow when the input is much larger than the domain; the result then serves any domain inside it) |
+| **slurb_centerline_interpolation** | 0.5 | m; point spacing the street outlines are densified to for the Voronoi centre lines in `prepare_slurb`. Larger is faster and gives coarser centre lines |
 | **slurb_reference_size** | 100.0 | m; plan/urban/frontal fractions and building height (plan-weighted) are averaged over a sliding window centred on each cell, because the SLUrb guide states the morphology is "well-defined only for reference areas of at least 100×100 m²". The window spans the smallest odd number of cells ≥ the size (11 cells = 110 m at dx = 10 m) and is clipped at the domain edge. The static driver takes the dominant non-urban type over the same window. 0 (or ≤ dx) = per grid cell |
 | **slurb_vars_done** | [building_frontal_area_fraction, building_height, building_plan_area_fraction, building_type, street_canyon_aspect_ratio, street_canyon_orientation, urban_fraction] | Variables written to the SLURB driver (only input-derived ones; constant placeholders are commented out) |
 | **canyon_search_radius** | 50.0 | m; each SLUrb cell takes its street canyon aspect ratio/orientation from canyon samples within this distance (the samples lie on street centre lines, outside the urban cells) |

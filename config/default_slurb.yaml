@@ -12,6 +12,17 @@ center_line_length: 15.0 # m
 building_outer_wall_lenght: 15.0 # m
 default_building_height: 20.0 # m
 
+# prepare_slurb works on the input schema. It processes only the domain
+# (from domain.cent_x/cent_y, nx/ny, dx/dy) plus this margin: street polygons
+# are clipped to that box, buildings and raster tiles touching it are taken
+# whole. The margin must exceed the canyon probe (50 m) plus
+# canyon_search_radius. 0 = process the whole input schema (slow when it is
+# much larger than the domain; the result then serves any domain inside it).
+slurb_clip_margin: 300.0 # m
+# point spacing (m) the street polygon outlines are densified to for the
+# Voronoi centre lines; larger = faster, coarser centre lines
+slurb_centerline_interpolation: 0.5 # m
+
 # general rules
 min_plan_area: 0.2  # fraction of buildings where slurm is applied, else use LSM only
 

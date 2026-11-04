@@ -65,6 +65,19 @@ class PrepareSlurbInputs(BaseTask):
             error(msg)
             raise ValueError(msg)
 
+    def _clip_box(self):
+        """SQL expression of the processing box (domain + slurb_clip_margin)
+        in the landcover srid, or None to process the whole input schema."""
+        margin = float(self.cfg.get('slurb_clip_margin', 0.0) or 0.0)
+        if margin <= 0:
+            return None
+        d = self.cfg.domain
+        x0, y0 = float(d.origin_x) - margin, float(d.origin_y) - margin
+        x1 = float(d.origin_x) + d.nx * d.dx + margin
+        y1 = float(d.origin_y) + d.ny * d.dy + margin
+        return (f'st_transform(st_makeenvelope({x0}, {y0}, {x1}, {y1}, {int(self.cfg.srid_palm)}), '
+                f'{int(self.cfg.srid)})')
+
     def create_centerlines(self):
         progress('creating centerline from landcover')
 
@@ -72,10 +85,26 @@ class PrepareSlurbInputs(BaseTask):
         self.execute(f'drop table if exists "{self.cfg.input_schema}"."{self.cfg.tables.centerline}"')
 
         debug('reading landcover parcels from database')
-        sql = f"""
-            select geom as geom from "{self.cfg.input_schema}"."{self.cfg.tables.landcover}"
-            where type in (201,202,203)
-        """
+        box = self._clip_box()
+        if box is None:
+            sql = f"""
+                select geom as geom from "{self.cfg.input_schema}"."{self.cfg.tables.landcover}"
+                where type in (201,202,203)
+            """
+        else:
+            # the street network is often one huge polygon, so the parcels are
+            # cut to the box rather than selected whole; the centre line is
+            # distorted only next to the cut, slurb_clip_margin away from the
+            # domain
+            progress('prepare_slurb limited to the domain + {} m (slurb_clip_margin)',
+                     self.cfg.slurb_clip_margin)
+            sql = f"""
+                select geom from (
+                    select st_collectionextract(st_intersection(geom, {box}), 3) as geom
+                    from "{self.cfg.input_schema}"."{self.cfg.tables.landcover}"
+                    where type in (201,202,203) and st_intersects(geom, {box})
+                ) s where not st_isempty(geom)
+            """
         parcels = pd.read_sql(sql, self.db.engine)
         # Check if there are some parcels, return error and end session
         if parcels.empty:
@@ -87,10 +116,11 @@ class PrepareSlurbInputs(BaseTask):
         debug('creating centerline from landcover')
         parcels.geom = parcels.geom.apply(lambda g: wkb.loads(g, hex=True))
 
+        interpolation = float(self.cfg.get('slurb_centerline_interpolation', 0.5))
         centerlines = []
         for index, row in parcels.iterrows():
             try:
-                c_line = Centerline(row['geom'])
+                c_line = Centerline(row['geom'], interpolation_distance=interpolation)
                 centerlines.append(c_line.geometry)
             except Exception as e:
                 verbose(f"skipping parcel {index} due to geometry error: {e}")
@@ -184,6 +214,22 @@ class PrepareSlurbInputs(BaseTask):
         self.execute(sql_intersections)
         self.set_table_owner(self.cfg.input_schema, self.cfg.tables.centerline_intersections)
 
+    def _raster_box_filter(self, alias):
+        """WHERE clause keeping the raster tiles that touch the processing box
+        (whole tiles), or '' without a box."""
+        box = self._clip_box()
+        if box is None:
+            return ''
+        return f'where st_intersects({alias}.rast, st_transform({box}, st_srid({alias}.rast)))'
+
+    def _building_box_filter(self, alias):
+        """AND clause keeping the building polygons that touch the processing
+        box (whole polygons, so wall and roof areas stay complete)."""
+        box = self._clip_box()
+        if box is None:
+            return ''
+        return f'and st_intersects({alias}.geom, {box})'
+
     def calculate_centerline_results(self):
         progress('computing canyon orientation, width and building heights')
         schema = self.cfg.input_schema
@@ -193,14 +239,19 @@ class PrepareSlurbInputs(BaseTask):
         sql_pixel = f"""
             drop table if exists "{schema}"."{self.cfg.tables.build_pixel}";
             create table "{schema}"."{self.cfg.tables.build_pixel}" as
-            select (st_pixelaspoints(b.rast)).geom as geom,
-                   (st_pixelaspoints(b.rast)).val  as val
-            from "{schema}"."{self.cfg.tables.buildings_height}" b;
+            -- lateral: the (f(x)).a, (f(x)).b form calls st_pixelaspoints
+            -- once per column, i.e. walks every raster tile twice
+            select p.geom as geom,
+                   p.val  as val
+            from "{schema}"."{self.cfg.tables.buildings_height}" b,
+                 lateral st_pixelaspoints(b.rast) p
+            {self._raster_box_filter('b')};
 
             -- the nearest-pixel laterals below and in the front-area step scan
             -- this table per point; without the index they are minutes-per-query
             create index if not exists {self.cfg.tables.build_pixel}_geom_idx
             on "{schema}"."{self.cfg.tables.build_pixel}" using gist(geom);
+            analyze "{schema}"."{self.cfg.tables.build_pixel}";
         """
         self.execute(sql_pixel)
         self.set_table_owner(schema, self.cfg.tables.build_pixel)
@@ -217,17 +268,20 @@ class PrepareSlurbInputs(BaseTask):
                 b2.val                                             as val_2,
                 geom_center                                        as geom
             from "{schema}"."{self.cfg.tables.centerline_intersections}"
+                -- <-> walks the gist index nearest-first (exact distance for
+                -- points); order by st_distance sorted every pixel within
+                -- 100 m (~31k per lookup on a 1 m raster)
                 left join lateral (
                     select bp.val
                     from "{schema}"."{self.cfg.tables.build_pixel}" bp
                     where st_dwithin(bp.geom, point_1, 100.0)
-                    order by st_distance(bp.geom, point_1) asc limit 1
+                    order by bp.geom <-> point_1 asc limit 1
                 ) b1 on true
                 left join lateral (
                     select bp.val
                     from "{schema}"."{self.cfg.tables.build_pixel}" bp
                     where st_dwithin(bp.geom, point_2, 100.0)
-                    order by st_distance(bp.geom, point_2) asc limit 1
+                    order by bp.geom <-> point_2 asc limit 1
                 ) b2 on true;
         """
         self.execute(sql_results)
@@ -261,8 +315,13 @@ class PrepareSlurbInputs(BaseTask):
             create temp table outer_wall_full as
             select st_forcerhr((st_dump(st_union(st_buffer(l.geom, 0.001)))).geom) as geom
             from "{schema}"."{self.cfg.tables.landcover}" as l
-            where l.type between {self.cfg.type_range.building_min} and {self.cfg.type_range.building_max};
+            where l.type between {self.cfg.type_range.building_min} and {self.cfg.type_range.building_max}
+                {self._building_box_filter('l')};
             alter table outer_wall_full add column id serial;
+            -- the building_area update below looks every building up by id;
+            -- without the key that is one full scan per building (quadratic)
+            alter table outer_wall_full add primary key (id);
+            analyze outer_wall_full;
 
             drop table if exists "{schema}"."{self.cfg.tables.outer_wall}";
             create table "{schema}"."{self.cfg.tables.outer_wall}" as
@@ -293,7 +352,7 @@ class PrepareSlurbInputs(BaseTask):
             set building_height = (
                 select bp.val from "{schema}"."{self.cfg.tables.build_pixel}" bp
                 where st_dwithin(bp.geom, ow.point, 100.0)
-                order by st_distance(bp.geom, ow.point) asc limit 1
+                order by bp.geom <-> ow.point asc limit 1
             )
             where building_height is null;
 

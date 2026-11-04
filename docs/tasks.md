@@ -145,6 +145,9 @@ fresh each time, the variant runs need nothing from the populate run beyond the 
   segments used for the canyon-orientation check) into the case schema — and it drops and
   rebuilds the whole case schema each run, so `slurb_driver` always needs an
   `initialize_domain` run *after* `prepare_slurb` in the pipeline order.
+  `prepare_slurb` only processes the domain plus `slurb_clip_margin` (300 m), so its tables
+  in the input schema fit the domain of the config it ran with: re-run it for a domain
+  elsewhere, or set `slurb_clip_margin: 0` to process the whole input schema once.
 - In SLURB mode the two drivers share the cells: SLUrb models the urban part
   (`urban_fraction` = buildings + streets) of every cell whose building plan fraction —
   averaged over the `slurb_reference_size` window (100 m) — reaches `min_plan_area`; the

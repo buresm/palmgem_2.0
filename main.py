@@ -14,8 +14,24 @@ def _run_task(factory, name):
     factory.get(name).run()
     elapsed = time.perf_counter() - t0
     progress("<--- task '{}' finished ({:.1f}s)", name, elapsed)
+    _vacuum_after_task(factory, name)
     # per-task timings of this run, consumed by the qa_report task
     factory.cfg._settings.setdefault('task_timings', []).append((name, round(elapsed, 1)))
+
+
+def _vacuum_after_task(factory, name):
+    """Clean up and re-analyze the schema the task wrote (vacuum_analyze switch):
+    gis_import fills the input schema, the other tasks the case schema. Skipped
+    for setup and finalize, which write no tables, and for tasks that only read."""
+    cfg = factory.cfg
+    if not cfg.get('vacuum_analyze', True) or name in ('setup', 'finalize', 'pids_check', 'qa_report', 'qgis_export'):
+        return
+    schema = cfg.input_schema if name == 'gis_import' else cfg.domain.case_schema
+    try:
+        factory.db.vacuum_analyze(schema)
+    except Exception as e:
+        # maintenance only: a failed vacuum must not abort the pipeline
+        warning("vacuum analyze of {} after task '{}' failed: {}", schema, name, e)
 
 
 def main(args=None):

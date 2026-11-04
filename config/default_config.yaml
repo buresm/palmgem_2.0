@@ -181,6 +181,11 @@ building_min_nz: 1
 boundary_fill_1: True
 boundary_fill_2: False
 
+# VACUUM (ANALYZE) the case schema after every task and the hot tables inside
+# the long tasks; the many whole-table UPDATEs otherwise bloat the tables and
+# leave the planner without statistics (False = rely on autovacuum)
+vacuum_analyze: True
+
 # compression of the output netcdf file
 zlib: False
 complevel: 4

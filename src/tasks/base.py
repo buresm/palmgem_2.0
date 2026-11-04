@@ -17,5 +17,13 @@ class BaseTask:
         """
         return getattr(self.db, name)
 
+    def vacuum_case_tables(self, *tables, full=False):
+        """VACUUM (ANALYZE) the named case-schema tables in the middle of a
+        task, before a step that reads tables an earlier step rewrote
+        (switch vacuum_analyze; missing tables are skipped). full=True
+        compacts the table as well (after deleting most of its rows)."""
+        if self.cfg.get('vacuum_analyze', True):
+            self.db.vacuum_analyze(self.cfg.domain.case_schema, list(tables), full=full)
+
     def run(self):
         raise NotImplementedError

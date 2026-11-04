@@ -1729,6 +1729,10 @@ class InitializeDomainTask(BaseTask):
             f'create index buildings_geom_idx on "{self.cfg.domain.case_schema}"."{self.cfg.tables.buildings_grid}" using gist(geom)')
         self.execute(
             f'create index buildings_point_idx on "{self.cfg.domain.case_schema}"."{self.cfg.tables.buildings_grid}" using gist(point)')
+        # joins on the grid id (fill_topo_v2, palm_tree_grid_2 once per tree layer)
+        self.execute(
+            f'create index buildings_grid_id_idx on "{self.cfg.domain.case_schema}"."{self.cfg.tables.buildings_grid}" (id)')
+        self.execute(f'analyze "{self.cfg.domain.case_schema}"."{self.cfg.tables.buildings_grid}"')
         self.execute(f'alter table "{self.cfg.domain.case_schema}"."{self.cfg.tables.buildings_grid}" '
                      f'add if not exists height double precision, add if not exists nz integer')
 
@@ -1831,6 +1835,12 @@ class InitializeDomainTask(BaseTask):
         """
         self.execute(sql_offset, (oro, oro, dz, oro, oro, dz, dz, oro, dz))
         self.set_table_owner(self.cfg.domain.case_schema, self.cfg.tables.buildings_offset)
+        # looked up per building cell by lid (fill_topo_v2, filling_grid);
+        # a plain index, lid may be null for cells without landcover
+        self.execute(
+            f'create index if not exists {self.cfg.tables.buildings_offset}_lid_idx '
+            f'on "{self.cfg.domain.case_schema}"."{self.cfg.tables.buildings_offset}" (lid)')
+        self.execute(f'analyze "{self.cfg.domain.case_schema}"."{self.cfg.tables.buildings_offset}"')
 
         # 7. apply artificial elevation to buildings and adjust grid terrain
         self.execute(f"""
@@ -2114,6 +2124,12 @@ class InitializeDomainTask(BaseTask):
         )
 
         self.execute(sql_call, params)
+
+        # palm_fill_building_holes_2 swaps the grid primary key (id) for
+        # (i, j, lid); the id lookups that follow (buildings_grid, nz_temp,
+        # palm_tree_grid_2) need an index on id back
+        self.execute(f'create index if not exists {self.cfg.tables.grid}_id_idx '
+                     f'on "{self.cfg.domain.case_schema}"."{self.cfg.tables.grid}" (id)')
 
     def topo_fill_corners(self):
         """
@@ -3114,12 +3130,16 @@ class InitializeDomainTask(BaseTask):
         building offset, topography fills, the CCT minimum building height,
         and the boundary fill once at the end. The boundary fill must come
         last so the topography fills cannot reopen boundary canyons. """
+        # the land-cover steps above rewrite the whole grid many times; the
+        # hole fill scans it once per iteration
+        self.vacuum_case_tables(self.cfg.tables.grid, self.cfg.tables.landcover)
         self.fill_missing_holes_in_grid()
 
         self.connect_buildings_height()
 
         self._define_building_offset()
 
+        self.vacuum_case_tables(self.cfg.tables.grid, self.cfg.tables.buildings_grid)
         self._run_all_topo_fills()
 
         self._apply_cct_min_building_height()

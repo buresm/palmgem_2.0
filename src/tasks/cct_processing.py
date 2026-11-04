@@ -559,6 +559,9 @@ class CctProcessing(BaseTask):
         self.execute(f'create index terr_height_corrected_j_i_idx on "{schema}"."{t_corrected}" (i asc, j asc)')
         self.execute(f'create index terr_height_corrected_geom_idx on "{schema}"."{t_corrected}" using gist(geom)')
         self.execute(f'create index terr_height_corrected_ji_idx on "{schema}"."{t_corrected}" (j, i)')
+        # a fresh table has no statistics until autovacuum gets to it, and the
+        # per-cell corrections below then run as full scans
+        self.execute(f'analyze "{schema}"."{t_corrected}"')
 
         # --- 7. Scan and Filter Step-Like Discontinuities ---
         sqltext = f"""
@@ -727,6 +730,8 @@ class CctProcessing(BaseTask):
             create index height_corrected_ji_idx on "{self.cfg.domain.case_schema}"."{self.cfg.tables.height_corrected}" (j, i)
         """
         self.execute(sqltext)
+        # statistics for the iterative corrections that follow (fresh table)
+        self.execute(f'analyze "{self.cfg.domain.case_schema}"."{self.cfg.tables.height_corrected}"')
 
         debug('Update building height dummy point, so filtering algorithm would work near edges')
         sqltext = f"""
@@ -5268,8 +5273,13 @@ class CctProcessing(BaseTask):
 
         self.create_integer_vertices()
 
+        # every face row has been rewritten several times above; the
+        # singularity check reads all of them and rewrites most again
+        self.vacuum_case_tables(self.cfg.tables.slanted_faces)
+
         # TODO: find duplicates, there are some points with the same x,y,z
         self.check_for_vertex_singularities()
+        self.vacuum_case_tables(self.cfg.tables.slanted_faces)
         self.unify_edge_vertices()
         self.merge_edge_vertices_into_surface_corners()
 
