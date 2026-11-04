@@ -1563,11 +1563,6 @@ class StaticDriverGen(BaseTask):
             nc_var = self.fetch_building_parameters(vn, par, self.cfg[vn][par], vt)
             self.ncfile.variables[vn][par, ...] = nc_var
 
-        # check window fraction limits for surface types (e.g., window vs wall fractions)
-        self.correct_win_frac(vn, 0, 3)
-        self.correct_win_frac(vn, 1, 4)
-        self.correct_win_frac(vn, 2, 5)
-
         # 3. building fraction
         vn = 'building_fraction'
         debug(f'Processing var: {vn}')
@@ -1575,6 +1570,13 @@ class StaticDriverGen(BaseTask):
         for par in self.cfg[vn]._settings.keys():
             nc_var = self.fetch_building_parameters(vn, par, self.cfg[vn][par], vt)
             self.ncfile.variables[vn][par, ...] = nc_var
+
+        # check window fraction limits: building_surface_type 0-2 are the wall
+        # fractions (gfl, agfl, roof), 3-5 the window fractions of the same
+        # levels (this ran on building_emissivity with the indices swapped)
+        self.correct_win_frac(vn, 3, 0)
+        self.correct_win_frac(vn, 4, 1)
+        self.correct_win_frac(vn, 5, 2)
 
         # 4. building general pars (non-surface specific)
         vn = 'building_general_pars'
@@ -2589,11 +2591,17 @@ class SlurbDriverGen(StaticDriverGen):
 
         radius = float(self.cfg.canyon_search_radius)
         sql = f"""
-            with pieces as (
-                select gs.id, (st_dumpsegments(st_intersection(s.geom, st_buffer(gs.point, %s)))).geom as g
+            with parts as (
+                select gs.id, (st_dump(st_intersection(s.geom, st_buffer(gs.point, %s)))).geom as part
                 from "{schema}"."{self.cfg.tables.grid_slurb}" gs
                 join "{schema}"."{segments}" s on st_dwithin(s.geom, gs.point, %s)
                 where gs.street_canyon_orientation is not null
+            ),
+            -- split into 2-point segments by hand: st_dumpsegments needs PostGIS >= 3.2
+            pieces as (
+                select id, st_makeline(st_pointn(part, n), st_pointn(part, n + 1)) as g
+                from parts, generate_series(1, st_npoints(part) - 1) as n
+                where st_geometrytype(part) = 'ST_LineString'
             ),
             coherence as (
                 select id,

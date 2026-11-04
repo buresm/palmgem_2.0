@@ -4,7 +4,8 @@
 
 ### PostgreSQL + PostGIS
 
-PALM-GeM requires PostgreSQL with the PostGIS, intarray, and PostGIS Raster extensions.
+PALM-GeM requires PostgreSQL with the PostGIS, intarray, and PostGIS Raster extensions. It runs on
+PostgreSQL 12 with PostGIS 3.1 and newer; the Docker image uses PostgreSQL 16 with PostGIS 3.4.
 
 You can run the database in **Docker**, install it **natively** (Linux or Windows), or run a Linux install inside **WSL** on Windows. PALM-GeM itself does not care which: it only needs a host, port and credentials (see [Database credentials](#database-credentials)), so switching later is a configuration change. The GIS import tools (`ogr2ogr` / `raster2pgsql` / `psql`) always run on the host either way — see [GDAL tools](#gdal-tools) below.
 

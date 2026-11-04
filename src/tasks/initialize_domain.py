@@ -1100,12 +1100,44 @@ class InitializeDomainTask(BaseTask):
 
         progress('copying and transforming vector data from inputs')
         self.copy_vectors_from_input()
+        self.normalize_wall_fractions()
 
         progress('copying and transforming raster data from inputs')
         self.copy_rasters_from_input()
 
         progress('copying surface parameters from inputs')
         self.check_surface_params()
+
+    def normalize_wall_fractions(self):
+        """
+        bring the wall/window fractions of the walls table (case copy) to 0-1.
+        PALM stops when wall + window + green of a surface does not sum to 1
+        ('relative material fractions do not sum-up to one'); green is written
+        as 0, so wall + window of each level has to be 1. Values above 1 are
+        taken as percent; a pair that still does not sum to 1 is rescaled.
+        """
+        cs, walls = self.cfg.domain.case_schema, self.cfg.tables.walls
+        cols = {r[0] for r in self.execute(
+            'select column_name from information_schema.columns where table_schema = %s and table_name = %s',
+            (cs, walls))}
+        pairs = [(wa, wi) for wa, wi in (('wallfracd', 'winfracd'), ('wallfracu', 'winfracu'))
+                 if wa in cols and wi in cols]
+        for col in [c for pair in pairs for c in pair]:
+            n_pct = self.execute(f'''
+                with u as (update "{cs}"."{walls}" set {col} = {col} / 100.0 where {col} > 1 returning 1)
+                select count(*) from u''')[0][0]
+            if n_pct:
+                warning(f'walls.{col}: {n_pct} value(s) above 1 taken as percent and divided by 100')
+            n_bad = self.execute(f'select count(*) from "{cs}"."{walls}" where {col} < 0 or {col} > 1')[0][0]
+            if n_bad:
+                error(f'walls.{col}: {n_bad} value(s) outside 0-1 (also as percent)')
+        for wa, wi in pairs:
+            n_sum = self.execute(f'''
+                with u as (update "{cs}"."{walls}" set {wa} = {wa} / ({wa} + {wi}), {wi} = {wi} / ({wa} + {wi})
+                           where {wa} + {wi} > 0 and abs({wa} + {wi} - 1) > 1e-5 returning 1)
+                select count(*) from u''')[0][0]
+            if n_sum:
+                warning(f'walls: {wa} + {wi} not 1 in {n_sum} wall(s), rescaled to sum to 1')
 
     def calculate_terrain_height(self):
         """

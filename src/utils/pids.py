@@ -230,6 +230,65 @@ def check_static_consistency(ds):
         if n_bare:
             findings.append(Finding(_ERROR, f'soil_type: {n_bare} vegetation/pavement cell(s) without soil type'))
 
+    findings.extend(check_building_fractions(ds))
+    return findings
+
+
+# PALM (usm_init) stops with 'relative material fractions do not sum-up to one
+# at some surfaces' when wall + window + green of a surface is off 1 by more
+# than this
+_FRACTION_TOL = 1e-5
+# building_fraction (building_surface_type): wall, window, green index per level
+_FRACTION_LEVELS = {'ground floor': (0, 3, 6), 'upper floors': (1, 4, 7), 'roof': (2, 5, 8)}
+
+
+def check_building_fractions(ds):
+    """Wall + window + green fractions must sum to 1, as PALM checks them.
+
+    building_fraction holds them per column and level (indices of
+    _FRACTION_LEVELS), building_surface_pars per surface (0 wall, 1 window,
+    2 green on wall, 3 green on roof; PALM lets the roof green overwrite the
+    wall green). PALM fills an undefined fraction from the building type, so
+    only fully defined sets are summed; a level that defines wall or window
+    but not both is reported as a warning (the mix with the type default
+    rarely sums to 1).
+    """
+    findings = []
+    v = ds.variables
+
+    def sums_off(wall, win, green):
+        total = wall.astype(float) + win.astype(float) + green.astype(float)
+        bad = ~np.ma.getmaskarray(total) & (np.abs(np.ma.filled(total, 1.0) - 1.0) > _FRACTION_TOL)
+        return bad, np.ma.filled(total, np.nan)
+
+    def sample(total, bad):
+        vals = np.unique(np.round(total[bad], 3))
+        return ', '.join(f'{x:g}' for x in vals[:5]) + (', ...' if vals.size > 5 else '')
+
+    if 'building_fraction' in v and v['building_fraction'].shape[0] >= 9:
+        bf = v['building_fraction'][:]
+        for level, (iw, iwi, ig) in _FRACTION_LEVELS.items():
+            bad, total = sums_off(bf[iw], bf[iwi], bf[ig])
+            if bad.any():
+                findings.append(Finding(_ERROR, f'building_fraction ({level}): wall + window + green '
+                                                f'not 1 in {int(bad.sum())} cell(s) (sums {sample(total, bad)})'))
+            n_half = int((np.ma.getmaskarray(bf[iw]) != np.ma.getmaskarray(bf[iwi])).sum())
+            if n_half:
+                findings.append(Finding(_WARNING, f'building_fraction ({level}): wall or window fraction '
+                                                  f'undefined in {n_half} cell(s) where the other is set'))
+
+    if 'building_surface_pars' in v and v['building_surface_pars'].shape[0] >= 4:
+        sp = v['building_surface_pars'][:4]
+        green = np.ma.where(np.ma.getmaskarray(sp[3]), sp[2], sp[3])
+        bad, total = sums_off(sp[0], sp[1], green)
+        if bad.any():
+            findings.append(Finding(_ERROR, f'building_surface_pars: wall + window + green not 1 on '
+                                            f'{int(bad.sum())} surface(s) (sums {sample(total, bad)})'))
+        n_half = int((np.ma.getmaskarray(sp[0]) != np.ma.getmaskarray(sp[1])).sum())
+        if n_half:
+            findings.append(Finding(_WARNING, f'building_surface_pars: wall or window fraction undefined on '
+                                              f'{n_half} surface(s) where the other is set'))
+
     return findings
 
 

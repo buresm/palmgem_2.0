@@ -4,7 +4,7 @@
 
 Every driver is validated right after it is written (`pids.enabled: True`, default) against `config/pids_spec.yaml`: required global attributes and dimensions, coordinate variables, per-variable dimensions/types/attributes from the PALM Input Data Standard, and cross-variable consistency rules:
 
-- **static driver** — terrain everywhere, exactly one surface type per cell, building variables on the same cells, no zero-height buildings, soil under vegetation and pavement;
+- **static driver** — terrain everywhere, exactly one surface type per cell, building variables on the same cells, no zero-height buildings, soil under vegetation and pavement, wall + window + green fractions summing to 1 per level in `building_fraction` and per surface in `building_surface_pars` (PALM stops otherwise with "relative material fractions do not sum-up to one at some surfaces");
 - **SLURB driver** — plan fraction ≤ urban fraction, fractions within [0, 1], positive height and canyon aspect ratio, orientation in [0, 360) or fill (isotropic), missing inputs in SLUrb cells (see the [SLURB section](configuration_docs.md#slurb-single-layer-urban-model-driver)).
 
 Findings are written to the log (`logs/<case_schema>`) as errors and warnings. `pids.strict: True` aborts the pipeline on errors. To re-check existing files without regenerating them, run the `pids_check` task.

@@ -331,3 +331,70 @@ def test_building_over_lsm_allowed_only_where_hollow_at_ground(tmp_path):
         findings = check_static_consistency(ds)
     assert any(f.level == 'error' and '1 building cell(s)' in f.message for f in findings)
     assert not any('more than one LSM' in f.message for f in findings)
+
+
+# --- building material fractions (check_building_fractions) -----------------
+
+def _make_fraction_nc(path, wall_win_green, surf_pars=None):
+    """1x1 driver with building_fraction (9 levels: wall 0-2, window 3-5,
+    green 6-8) set from {level: (wall, window, green)}, None = fill, and
+    optionally building_surface_pars rows (wall, window, green_w, green_r)."""
+    ds = netCDF4.Dataset(path, 'w')
+    ds.createDimension('x', 1)
+    ds.createDimension('y', 1)
+    ds.createDimension('building_surface_type', 9)
+    bf = ds.createVariable('building_fraction', 'f4', ('building_surface_type', 'y', 'x'), fill_value=FILL)
+    vals = np.full((9, 1, 1), FILL, dtype='f4')
+    for lvl, triple in wall_win_green.items():
+        for off, val in zip((0, 3, 6), triple):
+            if val is not None:
+                vals[lvl + off] = val
+    bf[:] = np.ma.masked_equal(vals, FILL)
+    if surf_pars is not None:
+        ds.createDimension('nbuilding_surface_pars', 4)
+        ds.createDimension('s', len(surf_pars))
+        sp = ds.createVariable('building_surface_pars', 'f4', ('nbuilding_surface_pars', 's'), fill_value=FILL)
+        a = np.array([[FILL if c is None else c for c in row] for row in surf_pars], dtype='f4').T
+        sp[:] = np.ma.masked_equal(a, FILL)
+    ds.close()
+
+
+def _fractions(path):
+    from src.utils.pids import check_building_fractions
+    with netCDF4.Dataset(path) as ds:
+        return check_building_fractions(ds)
+
+
+def test_fractions_summing_to_one_are_clean(tmp_path):
+    path = str(tmp_path / 'ok.nc')
+    _make_fraction_nc(path, {0: (0.7, 0.3, 0), 1: (0.6, 0.4, 0), 2: (1, 0, 0)},
+                      surf_pars=[(0.7, 0.3, 0, 0), (1, 0, 0, 0), (0.5, 0.2, 0.9, 0.3)])
+    assert _fractions(path) == []
+
+
+def test_percent_fractions_are_errors(tmp_path):
+    # wall/window given in percent (70/30) as in the Guelph inputs
+    path = str(tmp_path / 'pct.nc')
+    _make_fraction_nc(path, {0: (70, 30, 0), 1: (0.6, 0.4, 0), 2: (1, 0, 0)},
+                      surf_pars=[(70, 30, 0, 0), (1, 0, 0, 0)])
+    findings = _fractions(path)
+    assert _has(findings, 'error', 'building_fraction (ground floor)', 'sums 100')
+    assert not _has(findings, 'error', 'upper floors')
+    assert _has(findings, 'error', 'building_surface_pars', '1 surface')
+
+
+def test_roof_green_overrides_wall_green_on_surfaces(tmp_path):
+    # PALM takes the roof green (index 3) over the wall green (index 2)
+    path = str(tmp_path / 'green.nc')
+    _make_fraction_nc(path, {}, surf_pars=[(0.5, 0.2, 0.3, 0.5)])
+    assert _has(_fractions(path), 'error', 'building_surface_pars', 'sums 1.2')
+
+
+def test_half_defined_fractions_warn(tmp_path):
+    # undefined fractions come from the building type; only partial sets warn
+    path = str(tmp_path / 'half.nc')
+    _make_fraction_nc(path, {0: (None, None, 0), 1: (0.6, None, 0)})
+    findings = _fractions(path)
+    assert not any(f.level == 'error' for f in findings)
+    assert _has(findings, 'warning', 'upper floors', 'undefined in 1 cell')
+    assert not _has(findings, 'warning', 'ground floor')

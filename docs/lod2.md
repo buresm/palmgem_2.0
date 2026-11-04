@@ -25,6 +25,8 @@ A line shape defining detailed parametrization of vertical walls. In data, we di
 * winfrach: window fraction of upper levels
 * wallfracd: wall fraction of lower levels
 * wallfrach: wall fraction of upper leves
+
+Wall and window fractions are 0–1 and wall + window of each level should be 1 (PALM requires wall + window + green = 1 for every surface; green is written as 0). `initialize_domain` divides values above 1 by 100 (taken as percent) and rescales a pair that does not sum to 1, with a warning in the log.
 * zatep: insulation, boolean (integer 0, 1) switch
 * geom: line geometry
 
