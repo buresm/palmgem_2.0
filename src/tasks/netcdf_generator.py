@@ -2811,7 +2811,11 @@ class CCTDriverGen(CctProcessing, StaticDriverGen):
         cct_vegetation_type_classification = ncfile.variables['cct_vegetation_type_classification'][:]
         cct_pavement_type_classification = ncfile.variables['cct_pavement_type_classification'][:]
         cct_water_type_classification = ncfile.variables['cct_water_type_classification'][:]
-        cct_building_type_classification = ncfile.variables['cct_building_type_classification'][:]
+        if 'cct_building_type_classification' in ncfile.variables:
+            cct_building_type_classification = ncfile.variables['cct_building_type_classification'][:]
+        else:
+            # terrain-only cct (no building polygon left): the variable is not written
+            cct_building_type_classification = np.ma.masked_all(cct_surface_type_classification.shape, dtype='i4')
         kji_locs = ncfile.variables['cct_3d_grid_indices'][:]
 
         n_surfs = cct_surface_type_classification.size

@@ -122,6 +122,151 @@ class CctProcessing(BaseTask):
                                    f'dir{n} = %s, len{n} = %s where id = %s', batch)
         debug('cct: {} edge vertex reference(s) moved to the description from the solid corner', len(updates))
 
+    def merge_edge_vertices_into_surface_corners(self):
+        """ Merge an edge vertex into the edge corner it names as free when that
+        corner lies on the surface.
+
+        A vertex exactly on a grid corner (len 0) makes that corner full. Where
+        a surface runs along a grid edge (e.g. terrain exactly on a grid level
+        meeting a wall foot inside the edge), the vertex at the wall foot is
+        described from the other, solid end of the edge and names the corner on
+        the surface as free: the two descriptions contradict each other. The
+        mirrored case is a vertex described from the corner on the surface that
+        names the solid end free, which another vertex names full. Both ends of
+        the edge are solid, the edge holds no crossing, and the vertex is merged
+        into the corner on the surface. Only vertices in such a contradiction
+        move. Each face takes a description
+        of the corner that shares a corner with both ring neighbours (one of the
+        neighbours itself when it lies at that corner; the repeated vertex is
+        then dropped); where no single description does, two descriptions of
+        the corner follow each other, one linked to each neighbour. Faces left
+        with fewer than 3 vertices are removed by the degenerate-face cleanup
+        that follows. """
+        schema, table = self.cfg.domain.case_schema, self.cfg.tables.slanted_faces
+        cols = ', '.join(f'st_x(vert{n}), st_y(vert{n}), st_z(vert{n}), kk{n}, jj{n}, ii{n}, dir{n}, len{n}'
+                         for n in range(1, 8))
+        rows = self.execute(f'select id, {cols} from "{schema}"."{table}"')
+        shift = {0: (1, 0, 0), 1: (-1, 0, 0), 2: (0, 1, 0), 3: (0, -1, 0), 4: (0, 0, 1), 5: (0, 0, -1)}
+
+        def slots(r):
+            out = []
+            for n in range(7):
+                x, y, z, k, j, i, dr, ln = r[1 + 8 * n: 9 + 8 * n]
+                if x is None or i is None or ln is None:
+                    break
+                out.append(((x, y, z), (k, j, i, dr, ln)))
+            if len(out) > 1 and out[-1][1][:4] == out[0][1][:4] and out[-1][0] == out[0][0]:
+                out = out[:-1]                        # closing vertex
+            return out
+
+        def free_corner(dsc):
+            s = shift[dsc[3]]
+            return dsc[0] + s[0], dsc[1] + s[1], dsc[2] + s[2]
+
+        faces = {r[0]: slots(r) for r in rows}
+        corners = {}                                  # corner on the surface -> {description: position}
+        for ring in faces.values():
+            for pos, dsc in ring:
+                if dsc[4] < 1e-9:
+                    corners.setdefault(dsc[:3], {})[dsc] = pos
+        named_full = {dsc[:3] for ring in faces.values() for _, dsc in ring}
+        # moving edge vertex -> the surface corner it is merged into: the corner
+        # it names as free when that one is on the surface, or else its own
+        # (full) corner when that one is on the surface and another vertex
+        # names its free corner full (both ends of the edge solid again)
+        moving = {}
+        for ring in faces.values():
+            for pos, dsc in ring:
+                if not 1e-9 < dsc[4] < 1 - 1e-9:
+                    continue
+                free = free_corner(dsc)
+                if free in corners:
+                    moving[dsc] = free
+                elif dsc[:3] in corners and free in named_full:
+                    moving[dsc] = dsc[:3]
+        if not moving:
+            return
+
+        updates = []
+        for fid, ring in faces.items():
+            if not any(dsc in moving for _, dsc in ring):
+                continue
+            for allow_pairs in (True, False):
+                ded = self._merge_ring_into_corners(ring, moving, corners, free_corner, allow_pairs)
+                if len(ded) <= 7:                     # a face has room for 6 vertices + closing
+                    break
+            params = []
+            for m in range(7):
+                if m < len(ded):
+                    (x, y, z), (k, j, i, dr, ln) = ded[m]
+                    params.extend((x, y, z, k, j, i, dr, ln))
+                else:
+                    params.extend((None,) * 8)
+            updates.append(tuple(params) + (min(len(ded), 7), fid))
+        verbose('cct: {} edge vertex(es) naming a surface corner as free merged into that corner; '
+                '{} face(s) changed', len(moving), len(updates))
+        self.execute(f'create index if not exists "{table}_id_idx" on "{schema}"."{table}" (id)')
+        sets = ', '.join(f'vert{n} = st_setsrid(st_makepoint(%s, %s, %s), {self.cfg.srid_palm}), '
+                         f'kk{n} = %s, jj{n} = %s, ii{n} = %s, dir{n} = %s, len{n} = %s' for n in range(1, 8))
+        self.execute_batch(f'update "{schema}"."{table}" set {sets}, n_vert = %s where id = %s', updates)
+        ids = [u[-1] for u in updates]
+        self.execute(f"""
+            update "{schema}"."{table}" set geom = st_forcerhr(st_setsrid(st_makepolygon(st_makeline(array[
+                vert1, vert2, vert3, vert4, vert5, vert6, vert7])), %s))
+            where id = any(%s) and n_vert >= 4
+        """, (self.cfg.srid_palm, ids))
+        self.execute(f'update "{schema}"."{table}" set center = {self._face_center_sql()} '
+                     f'where id = any(%s) and n_vert >= 4', (self.cfg.srid_palm, ids))
+
+    @staticmethod
+    def _merge_ring_into_corners(ring, moving, corners, free_corner, allow_pairs):
+        """ The ring of a face (given without, returned with its closing vertex)
+        with its moving edge vertices replaced by descriptions of the surface
+        corner they are merged into (moving: vertex description -> corner; see
+        merge_edge_vertices_into_surface_corners). """
+        def linked(a, b):
+            # consecutive vertices must share their full or their free corner
+            return a == b or a[:3] == b[:3] or free_corner(a) == free_corner(b)
+
+        n = len(ring)
+        new = []
+        for m, (pos, dsc) in enumerate(ring):
+            if dsc not in moving:
+                new.append((pos, dsc))
+                continue
+            cands = corners[moving[dsc]]
+            prev, nxt = ring[(m - 1) % n][1], ring[(m + 1) % n][1]
+            nb_free = [free_corner(b) for b in (prev, nxt) if b not in moving]
+
+            def score(c):
+                return (2 if c in (prev, nxt) else 0) + sum(free_corner(c) == f for f in nb_free)
+
+            ordered = sorted(sorted(cands), key=score, reverse=True)
+            chain = None
+            for c in ordered:
+                if (prev in moving or linked(prev, c)) and (nxt in moving or linked(c, nxt)):
+                    chain = [c]
+                    break
+            if chain is None and allow_pairs:
+                # two descriptions of the corner, one linked to each neighbour
+                # (both name the corner as full, so they are linked to each other)
+                chain = next(([c1, c2] for c1 in ordered for c2 in ordered
+                              if c1 != c2 and linked(prev, c1) and linked(c2, nxt)), None)
+            if chain is None and prev not in moving and nxt not in moving and linked(prev, nxt):
+                # the neighbours link directly: the cut runs past the corner,
+                # which is solid on both sides, so the vertex is dropped
+                chain = []
+            if chain is None:
+                chain = [ordered[0]]
+            new.extend((cands[c], c) for c in chain)
+        ded = []
+        for p in new:
+            if not ded or ded[-1][1] != p[1]:
+                ded.append(p)
+        while len(ded) > 1 and ded[-1][1] == ded[0][1]:
+            ded.pop()
+        return ded + [ded[0]]
+
     def align_stairstep_with_cct(self):
         """ Make the stair-step topography (zt, buildings_2d, building_id/type
         and the surface types) follow the cut surface.
@@ -3468,6 +3613,141 @@ class CctProcessing(BaseTask):
         order_all = np.append(order, np.arange(n_vert, 7))
         return order_all
 
+    @staticmethod
+    def _join_rings_on_shared_edge(ring_a, ring_b, tol=1e-6):
+        """ Union of two polygon rings (no closing vertex) that share one edge:
+        ring_a with the shared edge replaced by the rest of ring_b. Returns the
+        joined ring as a list of points, or None when the rings share no edge
+        or share more than the two points of one edge. """
+        a = [np.asarray(p, dtype=float) for p in ring_a]
+        b = [np.asarray(p, dtype=float) for p in ring_b]
+        na, nb = len(a), len(b)
+        if na < 3 or nb < 3:
+            return None
+
+        def find(p, pts):
+            hits = [n for n, q in enumerate(pts) if np.all(np.abs(q - p) <= tol)]
+            return hits[0] if len(hits) == 1 else None
+
+        common = [n for n in range(na) if find(a[n], b) is not None]
+        if len(common) != 2:
+            return None
+        ia, ja = common
+        if ja == ia + 1:
+            first, second = ia, ja                    # edge a[ia] -> a[ja]
+        elif ia == 0 and ja == na - 1:
+            first, second = ja, ia                    # edge closes the ring of a
+        else:
+            return None
+        wa, wb = find(a[first], b), find(a[second], b)
+        if (wa + 1) % nb == wb:
+            step = -1
+        elif (wb + 1) % nb == wa:
+            step = 1
+        else:
+            return None                               # not adjacent in ring_b
+        path = []
+        n = (wa + step) % nb
+        while n != wb:
+            path.append(b[n])
+            n = (n + step) % nb
+        return a[:first + 1] + path + a[first + 1:] if second == first + 1 else a + path
+
+    @staticmethod
+    def _join_rings_at_shared_vertex(ring_a, ring_b, tol=1e-6):
+        """ Union of two polygon rings (no closing vertex) that touch in one
+        common vertex S: ring_a with ring_b inserted before S, entered at the
+        neighbour of S in ring_b nearer to the vertex before S in ring_a.
+        Returns None unless exactly one vertex is common. """
+        a = [np.asarray(p, dtype=float) for p in ring_a]
+        b = [np.asarray(p, dtype=float) for p in ring_b]
+        na, nb = len(a), len(b)
+        if na < 3 or nb < 3:
+            return None
+        common = [(m, n) for m in range(na) for n in range(nb) if np.all(np.abs(a[m] - b[n]) <= tol)]
+        if len(common) != 1:
+            return None
+        ta, wb = common[0]
+        before = a[ta - 1]
+        n_fwd, n_bwd = b[(wb + 1) % nb], b[(wb - 1) % nb]
+        step = 1 if np.linalg.norm(n_fwd - before) <= np.linalg.norm(n_bwd - before) else -1
+        path = [b[(wb + step * s) % nb] for s in range(1, nb)]
+        return a[:ta] + path + a[ta:]
+
+    @staticmethod
+    def _clip_wall_above_contact(wall_ring, terr_ring, tol=1e-5):
+        """ Part of a (vertical, convex) wall piece above the line where a
+        terrain piece touches it. The contact is the edge of the terrain ring
+        whose two points lie on the wall (in plan); both must lie on the
+        boundary of the wall piece. Returns the clipped ring (no closing
+        vertex) holding both contact points, or None when the terrain does not
+        touch the wall along exactly one such edge. """
+        w = [np.asarray(p, dtype=float) for p in wall_ring]
+        t = [np.asarray(p, dtype=float) for p in terr_ring]
+        if len(w) < 3 or len(t) < 3:
+            return None
+        # horizontal axis of the wall: its two points furthest apart in plan
+        pairs = [(np.linalg.norm(a[:2] - b[:2]), ia, ib) for ia, a in enumerate(w) for ib, b in enumerate(w) if ia < ib]
+        length, ia, ib = max(pairs)
+        if length <= tol:
+            return None
+        o, u = w[ia][:2], (w[ib][:2] - w[ia][:2]) / length
+
+        def on_wall(p):
+            r = p[:2] - o
+            return abs(r[0] * u[1] - r[1] * u[0]) <= tol and -tol <= r @ u <= length + tol
+
+        def s_of(p):
+            return (p[:2] - o) @ u
+
+        contact = [n for n in range(len(t)) if on_wall(t[n])]
+        if len(contact) != 2:
+            return None
+        c1, c2 = t[contact[0]], t[contact[1]]
+        if contact[1] - contact[0] not in (1, len(t) - 1):
+            return None
+        s1, s2 = s_of(c1), s_of(c2)
+        if abs(s2 - s1) <= tol:
+            return None
+
+        def z_line(s):
+            return c1[2] + (c2[2] - c1[2]) * (s - s1) / (s2 - s1)
+
+        def on_segment(p, a, b):
+            ab, ap = b - a, p - a
+            lab = np.linalg.norm(ab)
+            if lab <= tol:
+                return False
+            return np.linalg.norm(np.cross(ab, ap)) / lab <= tol and -tol <= ap @ ab / lab <= lab + tol
+
+        def same(a, b):
+            return np.all(np.abs(a - b) <= tol)
+
+        ring, found = [], 0
+
+        def add(p):
+            if not ring or not same(ring[-1], p):
+                ring.append(p)
+
+        n = len(w)
+        for m in range(n):
+            a, b = w[m], w[(m + 1) % n]
+            if a[2] >= z_line(s_of(a)) - tol:
+                add(a)
+            # contact points on this edge, in the order along the edge
+            on = [c for c in (c1, c2) if on_segment(c, a, b)]
+            on.sort(key=lambda c: np.linalg.norm(c - a))
+            for c in on:
+                found += 1
+                add(c)
+        while len(ring) > 1 and same(ring[0], ring[-1]):
+            ring.pop()
+        # each contact point is counted once per wall edge it lies on (twice at
+        # a wall vertex)
+        if found < 2 or len(ring) < 3 or not any(same(p, c1) for p in ring) or not any(same(p, c2) for p in ring):
+            return None
+        return ring
+
     def merge_local_wall_terrain(self, i, j, k, wall_coord, terr_coord, wall_vert, terr_vert):
         """ merging faces between terrain and wall """
         wall_coord = wall_coord[:wall_vert, :]
@@ -3506,6 +3786,42 @@ class CctProcessing(BaseTask):
                 return False
             nb = (i + on_x[0], j, k) if on_x else (i, j + on_y[0], k)
             return nb not in self._terrain_cells
+
+        # No terrain point lies under a wall top: the wall stands on the terrain
+        # step next to it (terrain rising across several levels along the
+        # wall), so the wall piece and the terrain piece of this cell share an
+        # edge (the wall foot) instead of the wall rising above terrain points.
+        # Raising feet does nothing then and the merge below would keep the
+        # terrain ring only, dropping the wall piece and opening the surface
+        # between the wall of the neighbouring column and the wall above. The
+        # two rings are joined along the shared edge. The gridded wall piece is
+        # the whole wall in the cell, so the part under the terrain (below the
+        # line where the terrain piece touches the wall) is cut off first.
+        if not tops:
+            clipped = self._clip_wall_above_contact(wall_coord, terr_coord)
+            joined = None if clipped is None else self._join_rings_on_shared_edge(terr_coord, clipped)
+            if joined is not None and len(joined) <= 6:
+                vert_order = np.zeros((8, 3), dtype=object)
+                vert_order[:] = None
+                vert_order[:len(joined)] = np.asarray(joined).astype('float')
+                return vert_order
+
+        # One terrain point lies under a wall top and the wall piece reaches past
+        # the terrain piece (a foot on the cell floor over lower terrain: the
+        # terrain falls away from the wall across levels). Raising that point
+        # would keep the terrain ring only and drop the rest of the wall piece;
+        # the rings are joined at their common vertex instead.
+        if len(tops) == 1 and getattr(self, '_terrain_cells', None) is not None \
+                and (i, j, k - 1) in self._terrain_cells:
+            terr_xy = {(float(p[0]), float(p[1])) for p in terr_coord}
+            exposed = [p for p in wall_coord if abs(float(p[2]) - floor_z) <= 1e-6
+                       and (float(p[0]), float(p[1])) not in terr_xy]
+            joined = self._join_rings_at_shared_vertex(terr_coord, wall_coord) if exposed else None
+            if joined is not None and len(joined) <= 6:
+                vert_order = np.zeros((8, 3), dtype=object)
+                vert_order[:] = None
+                vert_order[:len(joined)] = np.asarray(joined).astype('float')
+                return vert_order
 
         if len(tops) == 2 and getattr(self, '_terrain_cells', None) is not None:
             a, b = sorted(tops)
@@ -3680,11 +3996,19 @@ class CctProcessing(BaseTask):
         self.execute(f'alter table "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_faces}" add column id serial')
 
         verbose('Delete all wall that are under terr_wall faces')
+        # a wall face is buried when it lies below the lowest terrain face of
+        # its column. Where the terrain next to a wall rises across several
+        # levels inside one column (terrain raised along the wall foot), the
+        # wall pieces between the lowest and the highest terrain face are
+        # above the terrain at the wall line; comparing with any terrain face
+        # of the column (s.k < ts.k for each of them) deleted them too and left
+        # a hole between the wall and the terrain.
         sqltext = f"""
-            with ij_terr as (select i,j,k from "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_faces}" where isterr) 
-            select s.id 
-            from "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_faces}" as s 
-               right join ij_terr as ts on ts.i = s.i and ts.j = s.j 
+            with ij_terr as (select i, j, min(k) as k from "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_faces}"
+                             where isterr group by i, j)
+            select s.id
+            from "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_faces}" as s
+               right join ij_terr as ts on ts.i = s.i and ts.j = s.j
             where iswall and s.k < ts.k
         """
         ids = self.execute(sqltext)
@@ -3963,6 +4287,141 @@ class CctProcessing(BaseTask):
         sqltext = f'delete from "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_faces}" where id = any(%s)'
         self.execute(sqltext, (id2del,))
 
+    def snap_vertices_to_face_vertices(self):
+        """Merge vertices that lie inside a cell face into a vertex on the
+        boundary of that cell face.
+
+        Where a wall meets terrain that rises across several levels within one
+        cell next to it, the terrain, the wall and a grid level meet in a point
+        inside a cell face (e.g. on the top of a cell, between the wall line
+        and the terrain step). Rounding that point onto the nearest grid edge
+        can put it on an edge that lies inside the building: the corner of that
+        edge is then free for this vertex and full for the wall vertex next to
+        it. The cut surface crosses a cell face along straight lines between
+        points on the edges of that face, so the point is merged into the
+        nearest vertex that already lies on the boundary of its cell face. A
+        face that keeps fewer than 3 vertices (the wall piece between the wall
+        line and the terrain step) carries no surface and is deleted. Points
+        inside a cell (off the grid planes in all coordinates) and points with
+        no such vertex are left to the rounding in snap_vertices_to_edges.
+        """
+        d = self.cfg.domain
+        cs, tb = d.case_schema, self.cfg.tables.slanted_faces
+        tol = 1e-8
+        cols = ', '.join(f'st_x(vert{n}), st_y(vert{n}), st_z(vert{n})' for n in range(1, 8))
+        conds = []
+        for n in range(1, 8):
+            v = f'vert{n}'
+            ex, ey, ez = (f'abs({c} - round({c}))' for c in (
+                f'((st_x({v}) - {d.origin_x}) / {d.dx})', f'((st_y({v}) - {d.origin_y}) / {d.dy})',
+                f'(st_z({v}) / {d.dz})'))
+            conds.append(f'({v} is not null and ({ex} > {tol})::int + ({ey} > {tol})::int + ({ez} > {tol})::int >= 2)')
+        rows = self.execute(f'select id, {cols} from "{cs}"."{tb}" where ' + ' or '.join(conds))
+        if not rows:
+            return
+
+        scale = np.array([d.dx, d.dy, d.dz], dtype=float)
+        origin = np.array([d.origin_x, d.origin_y, 0.0], dtype=float)
+
+        def to_grid(p):
+            return (np.array(p, dtype=float) - origin) / scale
+
+        def key(p):
+            return tuple(int(round(c * 1e6)) for c in to_grid(p))
+
+        def off_axes(g):
+            return [a for a in range(3) if abs(g[a] - round(g[a])) > tol]
+
+        def ring(r):
+            # the ring of the face without its closing vertex
+            pts = [tuple(r[3 * n: 3 * n + 3]) for n in range(7)]
+            pts = [p for p in pts if p[0] is not None]
+            if len(pts) > 1 and key(pts[-1]) == key(pts[0]):
+                pts = pts[:-1]
+            return pts
+
+        faces = {r[0]: ring(r[1:]) for r in rows}
+        off = {}
+        for pts in faces.values():
+            for p in pts:
+                g = to_grid(p)
+                if len(off_axes(g)) == 2:
+                    off[key(p)] = (p, g)
+        if not off:
+            return
+
+        # vertices on grid edges of the faces in the columns around the points
+        cols_ij = {(int(np.floor(g[0])) + di, int(np.floor(g[1])) + dj)
+                   for _, g in off.values() for di in (-1, 0, 1) for dj in (-1, 0, 1)}
+        ci, cj = zip(*sorted(cols_ij))
+        near = self.execute(f"""
+            select {cols} from "{cs}"."{tb}" as s
+            join unnest(%s::int[], %s::int[]) as c(i, j) on c.i = s.i and c.j = s.j
+        """, (list(ci), list(cj)))
+        by_plane = {}
+        for r in near:
+            for p in ring(r):
+                g = to_grid(p)
+                if len(off_axes(g)) > 1:
+                    continue
+                for a in range(3):
+                    if abs(g[a] - round(g[a])) <= tol:
+                        by_plane.setdefault((a, int(round(g[a]))), {})[key(p)] = (p, g)
+
+        target = {}
+        for kp, (p, g) in off.items():
+            b, c = off_axes(g)
+            a = 3 - b - c
+            lo_b, lo_c = np.floor(g[b]), np.floor(g[c])
+            best, best_d = None, None
+            for q, gq in by_plane.get((a, int(round(g[a]))), {}).values():
+                if not (lo_b - tol <= gq[b] <= lo_b + 1 + tol and lo_c - tol <= gq[c] <= lo_c + 1 + tol):
+                    continue
+                dist = np.linalg.norm((gq - g) * scale)
+                if best_d is None or dist < best_d:
+                    best, best_d = q, dist
+            if best is not None:
+                target[kp] = best
+        if not target:
+            return
+
+        updates, to_delete = [], []
+        for fid, pts in faces.items():
+            if not any(key(p) in target for p in pts):
+                continue
+            new = []
+            for p in pts:
+                p = target.get(key(p), p)
+                if not new or key(new[-1]) != key(p):
+                    new.append(p)
+            while len(new) > 1 and key(new[-1]) == key(new[0]):
+                new.pop()
+            if len(new) < 3:
+                to_delete.append(fid)
+                continue
+            new = new + [new[0]]
+            params = []
+            for n in range(7):
+                params.extend(new[n] if n < len(new) else (None, None, None))
+            updates.append(tuple(params) + (len(new), fid))
+        verbose('{} vertex position(s) inside cell faces merged into a vertex on the cell face boundary; '
+                '{} face(s) changed, {} face(s) without area removed', len(target), len(updates), len(to_delete))
+        self.execute(f'create index if not exists "{tb}_id_idx" on "{cs}"."{tb}" (id)')
+        if to_delete:
+            self.execute(f'delete from "{cs}"."{tb}" where id = any(%s)', (to_delete,))
+        if updates:
+            sets = ', '.join(f'vert{n} = st_setsrid(st_makepoint(%s, %s, %s), {self.cfg.srid_palm})'
+                             for n in range(1, 8))
+            self.execute_batch(f'update "{cs}"."{tb}" set {sets}, n_vert = %s where id = %s', updates)
+            ids = [u[-1] for u in updates]
+            self.execute(f"""
+                update "{cs}"."{tb}" set geom = st_forcerhr(st_setsrid(st_makepolygon(st_makeline(array[
+                    vert1, vert2, vert3, vert4, vert5, vert6, vert7])), %s))
+                where id = any(%s)
+            """, (self.cfg.srid_palm, ids))
+            self.execute(f'update "{cs}"."{tb}" set center = {self._face_center_sql()} where id = any(%s)',
+                         (self.cfg.srid_palm, ids))
+
     def snap_vertices_to_edges(self):
         """Move vertices that lie on no grid edge onto the nearest one.
 
@@ -3971,13 +4430,18 @@ class CctProcessing(BaseTask):
         the terrain inside a cell is not planar (a fold of the terrain triangles
         crossing a grid level inside a cell face, e.g. next to the terrain
         raised along walls) a vertex can end up inside a cell face; its
-        description then names a point up to a cell away from it. Such a vertex
-        keeps the coordinate furthest from a grid line and the others are
-        rounded onto their grid lines. The move depends on the position only,
-        so all faces sharing the vertex move it alike and stay connected.
+        description then names a point up to a cell away from it.
+
+        A vertex inside a cell face is first merged into the nearest vertex
+        that already lies on the boundary of that cell face (see
+        snap_vertices_to_face_vertices). A vertex with no such neighbour keeps
+        the coordinate furthest from a grid line and the others are rounded
+        onto their grid lines. The move depends on the position only, so all
+        faces sharing the vertex move it alike and stay connected.
         """
         d = self.cfg.domain
         cs, tb = self.cfg.domain.case_schema, self.cfg.tables.slanted_faces
+        self.snap_vertices_to_face_vertices()
         moved = set()
         for ni in range(1, 8):
             v = f'vert{ni}'
@@ -4807,6 +5271,7 @@ class CctProcessing(BaseTask):
         # TODO: find duplicates, there are some points with the same x,y,z
         self.check_for_vertex_singularities()
         self.unify_edge_vertices()
+        self.merge_edge_vertices_into_surface_corners()
 
         # normals and areas of the final face geometry (the singularity check
         # rewrote faces), then drop degenerate faces before the vertex table is
