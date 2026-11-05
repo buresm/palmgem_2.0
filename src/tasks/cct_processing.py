@@ -785,6 +785,67 @@ class CctProcessing(BaseTask):
                 # top, right are lower, correct height in both of them to min(hh, hdiag)
                 self.execute(sqlcorr, (min(hh, hdiag), i + 1, j, i, j + 1))
 
+    def limit_wall_terrain_step(self):
+        """ Limit the terrain height step next to walls (optional,
+        slanted_pars.max_wall_terrain_step, in grid levels per grid spacing;
+        0 or missing: off).
+
+        The wall foot is raised to the terrain beside the wall, and the terrain
+        near the wall takes the wall foot height. Where the terrain beside a
+        wall is much higher than a few metres away, this puts a step of several
+        grid levels inside one grid column next to the wall. The cut surface
+        there needs vertices inside cell faces and terrain lying exactly on a
+        grid level against the wall foot, where it is not always consistent.
+        This pass raises the lower terrain points (wall points included) so
+        that the height falls by at most max_wall_terrain_step * dz per dx away
+        from the terrain near walls: the step becomes a ramp over the next
+        cells. Only heights near walls and the ramp they need are changed; the
+        raised heights are rounded up to whole grid levels, as the wall feet
+        are. Returns the number of raised points. """
+        step = float(self.cfg.slanted_pars.get('max_wall_terrain_step', 0) or 0)
+        if step <= 0:
+            return 0
+        d = self.cfg.domain
+        cs, tb = d.case_schema, self.cfg.tables.height_terr_corrected
+        slope = step * d.dz / min(d.dx, d.dy)          # allowed fall per metre
+        reach = 1.5 * max(d.dx, d.dy)                  # grid neighbours and nearby wall points
+        near = max(float(self.cfg.slanted_pars.dist2edge), max(d.dx, d.dy))
+        self.execute(f"""
+            alter table "{cs}"."{tb}" add column if not exists step_src boolean;
+            alter table "{cs}"."{tb}" add column if not exists step_h0 double precision;
+            update "{cs}"."{tb}" as t set step_h0 = t.height, step_src = t.iswall or exists (
+                select 1 from "{cs}"."{self.cfg.tables.walls_outer}" as w where st_dwithin(w.geom, t.geom, {near}))
+            where t.step_src is null
+        """)
+        total = 0
+        for _ in range(1000):
+            rows = self.execute(f"""
+                with need as (
+                    select p.ctid as pid, max(q.height - {slope} * st_distance(p.geom, q.geom)) as hmin
+                    from "{cs}"."{tb}" as p
+                    join "{cs}"."{tb}" as q
+                      on st_dwithin(p.geom, q.geom, {reach}) and p.ctid <> q.ctid
+                    where q.step_src and q.height is not null and p.height is not null
+                    group by p.ctid
+                )
+                update "{cs}"."{tb}" as t set
+                    height = ceil(n.hmin / {d.dz} - 1e-9) * {d.dz},
+                    step_src = true
+                from need as n
+                where t.ctid = n.pid and n.hmin > t.height + 1e-9
+                returning 1
+            """)
+            if not rows:
+                break
+            total += len(rows)
+        if total:
+            n_pts, max_up = self.execute(f"""
+                select count(*), max(height - step_h0) from "{cs}"."{tb}" where height > step_h0 + 1e-9
+            """)[0]
+            progress('terrain step next to walls limited to {} level(s) per cell: {} point(s) raised so far, '
+                     'by up to {:.2f} m', step, n_pts, max_up or 0.0)
+        return total
+
     def create_slanted_walls_terrain(self):
         """ So far dummy function, just idea """
         # SELECT intersecting point from wall
@@ -949,6 +1010,9 @@ class CctProcessing(BaseTask):
         """
         ij2corr = [1]
         while len(ij2corr) > 0:
+            # both the step limit and the filter only raise heights, so they are
+            # repeated together until neither changes anything
+            self.limit_wall_terrain_step()
             ij2corr = self.execute(sqltext)
 
             sqlcorr = f"""

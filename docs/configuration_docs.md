@@ -187,6 +187,7 @@
 | **slanted_pars.edge_angle_max** | 245.0 | deg; (CCT) upper limit, see **slanted_pars.edge_angle_min** |
 | **slanted_pars.edge_2_edge_distance** | 1.7 | m; (CCT) a vertex is corrected only when its two neighbours are farther apart than this |
 | **slanted_pars.corner_passes** | 5 | (CCT) passes of the building corner smoothing; each pass cuts the remaining corners back by about **slanted_pars.edge_segment_length** (a 10 × 10 m building keeps ~98 % of its footprint after 1 pass, ~71 % after 5) |
+| **slanted_pars.max_wall_terrain_step** | 0 | dz per dx; (CCT) largest terrain height step next to walls. The wall foot is raised to the terrain beside the wall, which can put a step of several grid levels inside one grid column there; such steps can leave the cut surface inconsistent (corner full/free conflicts, open edges). With a value > 0 (e.g. 1) the lower terrain is raised so the height falls by at most this many levels per grid spacing away from the walls: the step becomes a ramp over the neighbouring cells (terrain changes only next to such steps, rounded up to whole levels). 0 = off |
 | **slanted_pars.dist2edge** | 3.0 | m; (CCT) terrain points within twice this distance of a wall are height-corrected |
 | **slanted_pars.dist2edge_filter** | 0.6 | m; (CCT) search distance when correcting terrain heights inside buildings |
 | **slanted_pars.roofs_dist2edge** | 2.0 | m; (CCT) roof points within this distance of the roof edge are set to floor(height) |

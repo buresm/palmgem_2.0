@@ -145,6 +145,7 @@ slanted_pars:
     edge_angle_max: 245.0
     edge_2_edge_distance: 1.7
     corner_passes: 5             # passes of the building corner smoothing (each cuts corners by ~edge_segment_length)
+    max_wall_terrain_step: 0     # max terrain step next to walls, in dz per dx (e.g. 1); steeper steps are ramped up; 0 = off
     
     
 fill_missing_holes: True
