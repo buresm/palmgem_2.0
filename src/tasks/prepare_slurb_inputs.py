@@ -240,8 +240,12 @@ class PrepareSlurbInputs(BaseTask):
             drop table if exists "{schema}"."{self.cfg.tables.build_pixel}";
             create table "{schema}"."{self.cfg.tables.build_pixel}" as
             -- lateral: the (f(x)).a, (f(x)).b form calls st_pixelaspoints
-            -- once per column, i.e. walks every raster tile twice
-            select p.geom as geom,
+            -- once per column, i.e. walks every raster tile twice.
+            -- The pixel points go into {self.cfg.srid}, the srid of the canyon
+            -- and wall points they are matched with: left in the raster srid
+            -- (e.g. 3035 next to a 32633 landcover) the 100 m search compares
+            -- coordinates of two systems, finds nothing and every height is null.
+            select st_transform(p.geom, {int(self.cfg.srid)}) as geom,
                    p.val  as val
             from "{schema}"."{self.cfg.tables.buildings_height}" b,
                  lateral st_pixelaspoints(b.rast) p
