@@ -103,11 +103,15 @@ class CctProcessing(BaseTask):
         updates = []
         for g in groups.values():
             descs = {u[2][:4]: u[2] for u in g['uses']}
-            if len(descs) < 2:
+            # the same corner and direction with shifts that differ by rounding
+            # (Legerova: 0.15624999721 and 0.15624999814 on one roof edge) are
+            # one point as well; the vertex table groups by the exact shift and
+            # kept two vertices, each linked to half of the faces (open edges)
+            if len(descs) < 2 and len({u[2] for u in g['uses']}) < 2:
                 continue
             best = max(descs.values(), key=lambda dsc: sign[dsc[3]] * g['normal'][axis[dsc[3]]])
             for fid, n, dsc in g['uses']:
-                if dsc[:4] != best[:4]:
+                if dsc != best:
                     updates.append((n, best, fid))
         if not updates:
             return
@@ -303,19 +307,36 @@ class CctProcessing(BaseTask):
                 f'where not coalesce(iswall, false) and center is not null'):
             if (i, j) not in top or k > top[(i, j)][0]:
                 top[(i, j)] = (k, roof, cz, lid)
-        grid = {(i, j): (gid, nz, lid) for gid, i, j, nz, lid in
-                self.execute(f'select id, i, j, nz, lid from "{schema}"."{grid_t}"')}
+        # a cell the topography fills raised (initialize_domain keeps its
+        # terrain from before the fills in nz_prefill while it still holds the
+        # filled height) is open ground the fill lifted to the height of the
+        # buildings around it; the cut surface keeps the old terrain there and,
+        # where the building outline covers the cell, a roof at building height.
+        # Measured from the raised terrain that roof gave a 1-level building on
+        # a 22 m terrain column (Legerova 600x800: 2 columns more than one cell
+        # off the cut surface, a PIDS error); the terrain goes back instead.
+        has_prefill = bool(self.execute(
+            "select 1 from information_schema.columns where table_schema = %s and table_name = %s "
+            "and column_name = 'nz_prefill'", (schema, grid_t)))
+        prefill = ('case when height_filled is not null and height = height_filled '
+                   'and nz_prefill < nz then nz_prefill end') if has_prefill else 'null::integer'
+        grid = {(i, j): (gid, nz, lid, pnz) for gid, i, j, nz, lid, pnz in
+                self.execute(f'select id, i, j, nz, lid, {prefill} from "{schema}"."{grid_t}"')}
         bnz = {gid: nz for gid, nz in self.execute(f'select id, nz from "{schema}"."{bgrid_t}"')}
         land_lids = {lid for (lid,) in self.execute(
             f'select lid from "{schema}"."{lc_t}" where not type between %s and %s',
             (self.cfg.type_range.building_min, self.cfg.type_range.building_max))}
 
         new_build, set_bnz, drop_build, set_lid, set_tnz, near_land = [], [], [], [], [], []
+        unfill = []
         for c, (k, roof, cz, face_lid) in top.items():
             if c not in grid:
                 continue
-            gid, tnz, glid = grid[c]
+            gid, tnz, glid, pnz = grid[c]
             target = int(round(cz / dz))
+            if roof and pnz is not None:
+                unfill.append(gid)
+                tnz = pnz
             terrain = tnz + adjust
             if roof:
                 nz = max(target - terrain, 1)
@@ -344,6 +365,11 @@ class CctProcessing(BaseTask):
             self.execute_batch(sql, params)
             self.execute(f'drop index if exists "{schema}"."{idx}"')
 
+        if unfill:
+            self.execute(f'update "{schema}"."{grid_t}" set nz = nz_prefill, height = height_prefill '
+                         f'where id = any(%s)', (unfill,))
+            progress('stair-step: {} column(s) raised by the topography fills and roofed by the cut surface '
+                     'keep their terrain from before the fills', len(unfill))
         if set_bnz:
             batch_by_id(bgrid_t, f'update "{schema}"."{bgrid_t}" set nz = %s, height = %s where id = %s', set_bnz)
         if drop_build:
@@ -502,11 +528,22 @@ class CctProcessing(BaseTask):
         self.execute(sqltext, (self.cfg.srid_palm,))
 
         # --- 4. Calculate Height (Moving Window Average) ---
+        # cells the topography fills of initialize_domain raised to building
+        # height (and that still hold that height) count with their terrain
+        # height from before the fills: the cut-cell surface takes buildings
+        # from their outlines, and a raised cell was a terrain column standing
+        # against the slanted walls. Schemas made before the snapshot existed
+        # have no height_prefill column and use height as before.
+        has_prefill = bool(self.execute(
+            "select 1 from information_schema.columns where table_schema = %s and table_name = %s "
+            "and column_name = 'height_prefill'", (schema, t_grid)))
+        g_height = ('case when g.height_filled is not null and g.height = g.height_filled '
+                    'then g.height_prefill else g.height end') if has_prefill else 'g.height'
         sqltext = f"""
-            update "{schema}"."{t_corrected}" as h 
+            update "{schema}"."{t_corrected}" as h
             set height = (
-                select avg(height) - {self.cfg.domain.origin_z} 
-                from "{schema}"."{t_grid}" as g 
+                select avg({g_height}) - {self.cfg.domain.origin_z}
+                from "{schema}"."{t_grid}" as g
                 where g.i between h.i - 1 and h.i + 1 
                   and g.j between h.j - 1 and h.j + 1
             )
@@ -2806,6 +2843,15 @@ class CctProcessing(BaseTask):
             sqltext = f'alter table "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_roof_gridded}" drop column rgid'
             self.execute(sqltext)
 
+    @staticmethod
+    def _ijk_in(cells):
+        """ SQL condition selecting the face rows of the given (i, j, k) cells.
+        A row-value IN over a VALUES list is planned as one hashed semi-join;
+        the former chain of '(i = .. and j = .. and k = ..) or ..' terms (one
+        per cell, ~19,000 on a 600x800 domain) was evaluated term by term for
+        every face row, and its DELETE ran for more than 10 h. """
+        return '(i, j, k) in (values ' + ', '.join(f'({int(i)}, {int(j)}, {int(k)})' for i, j, k in cells) + ')'
+
     def merge_walls_terrain(self):
         """ merging roof edges with walls """
         progress('merging grid faces of terrain and walls')
@@ -2835,7 +2881,7 @@ class CctProcessing(BaseTask):
         # two terrain pieces and another two walls: the counts still agree but
         # every later wall is merged with the wrong terrain and filed under the
         # wrong cell. Cells that do not hold one of each are left unmerged.
-        sqltext_ijk = ' or '.join([f'(i = {i} and j = {j} and k = {k})' for i, j, k in zip(i_all, j_all, k_all)])
+        sqltext_ijk = self._ijk_in(zip(i_all, j_all, k_all))
         sqltext = f"""
             select i, j, k, coalesce(iswall, false), wid,
             array[st_x(vert1), st_y(vert1), st_z(vert1)],
@@ -2860,7 +2906,7 @@ class CctProcessing(BaseTask):
         if not cells:
             return
         i_all, j_all, k_all = [c[0] for c in cells], [c[1] for c in cells], [c[2] for c in cells]
-        sqltext_ijk = ' or '.join([f'(i = {i} and j = {j} and k = {k})' for i, j, k in cells])
+        sqltext_ijk = self._ijk_in(cells)
         wid = [walls[c][0][4] for c in cells]
         wall_coord = [walls[c][0][5:12] for c in cells]
         terr_coord = [terrs[c][0][5:12] for c in cells]
@@ -3221,7 +3267,7 @@ class CctProcessing(BaseTask):
 
         # SELECT ALL rid
         debug('Finding all rids')
-        sqltext_ijk = ' or '.join([f'(i = {i} and j = {j} and k = {k})' for i, j, k in zip(i_all, j_all, k_all)])
+        sqltext_ijk = self._ijk_in(zip(i_all, j_all, k_all))
         # one rid per cell, keyed by (i, j, k): a cell can hold two roof pieces
         # or none (two walls), so a plain ordered list would not line up
         sqltext = f'select i, j, k, min(rid) from "{self.cfg.domain.case_schema}"."{self.cfg.tables.slanted_faces}" where isroof and ({sqltext_ijk}) group by i, j, k'

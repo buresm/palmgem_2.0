@@ -114,10 +114,12 @@ FILL_B = -127
 
 
 def _make_surface_nc(path, *, veg=None, pave=None, bld_h=None, bld_id=None,
-                     bld_type=None, soil=None, zt=None, surface_fraction=False):
+                     bld_type=None, soil=None, wat=None, zt=None, surface_fraction=False,
+                     no_water=False):
     """2x2 driver holding only the surface variables. Each argument is a 2x2
     list; None entries become fill values. Variables left as None are not
-    written at all."""
+    written at all, except water_type, which is all fill by default (the
+    driver always writes it) and left out with no_water."""
     ds = netCDF4.Dataset(path, 'w')
     ds.createDimension('x', 2)
     ds.createDimension('y', 2)
@@ -137,6 +139,8 @@ def _make_surface_nc(path, *, veg=None, pave=None, bld_h=None, bld_id=None,
     var('building_id', bld_id, 'i4', -9999)
     var('building_type', bld_type, 'i1', FILL_B)
     var('soil_type', soil, 'i1', FILL_B)
+    if not no_water:
+        var('water_type', wat if wat is not None else [[None, None], [None, None]], 'i1', FILL_B)
     if surface_fraction:
         ds.createDimension('nsurface_fraction', 3)
         ds.createVariable('surface_fraction', 'f4', ('nsurface_fraction', 'y', 'x'))
@@ -210,6 +214,15 @@ def test_missing_soil_and_terrain_are_errors(tmp_path):
     assert any('zt' in m and 'terrain' in m for m in messages)
 
 
+def test_missing_surface_classification_is_error(tmp_path):
+    # PALM needs all four LSM classifications in the file (DRV0011)
+    path = str(tmp_path / 'nowater.nc')
+    _make_surface_nc(path, veg=[[3, 3], [3, 3]], pave=[[None, None], [None, None]],
+                     soil=[[1, 1], [1, 1]], no_water=True)
+    assert any(f.level == 'error' and 'water_type missing' in f.message and 'DRV0011' in f.message
+               for f in _consistency(path))
+
+
 def test_consistency_runs_only_when_spec_enables_it(tmp_path):
     path = str(tmp_path / 'gate.nc')
     _make_surface_nc(path, veg=[[3, 3], [3, None]], soil=[[1, 1], [1, None]])
@@ -236,9 +249,10 @@ def _make_slurb_nc(path, **fields):
     ds.close()
 
 
-# cells: (0,0) SLUrb, (0,1) SLUrb, (1,0) SLUrb, (1,1) non-urban (all fill)
+# cells: (0,0) SLUrb, (0,1) SLUrb, (1,0) SLUrb, (1,1) non-urban (urban_fraction 0,
+# the rest fill)
 _SLURB_OK = dict(
-    urban_fraction=[[0.9, 0.6], [0.5, None]],
+    urban_fraction=[[0.9, 0.6], [0.5, 0.0]],
     building_plan_area_fraction=[[0.4, 0.3], [0.2, None]],
     building_frontal_area_fraction=[[0.1, 0.08], [0.05, None]],
     building_height=[[9.0, 7.0], [6.0, None]],
@@ -269,7 +283,7 @@ def test_slurb_plan_exceeding_urban_is_error(tmp_path):
 
 def test_slurb_ranges_are_errors(tmp_path):
     f = _slurb(str(tmp_path / 'r.nc'),
-               urban_fraction=[[1.2, 0.6], [0.5, None]],
+               urban_fraction=[[1.2, 0.6], [0.5, 0.0]],
                building_height=[[0.0, 7.0], [6.0, None]],
                street_canyon_aspect_ratio=[[-0.1, 0.2], [0.1, None]],
                street_canyon_orientation=[[360.0, None], [179.0, None]],
@@ -279,6 +293,12 @@ def test_slurb_ranges_are_errors(tmp_path):
     assert _has(f, 'error', 'street_canyon_aspect_ratio', '<= 0')
     assert _has(f, 'error', 'street_canyon_orientation', 'outside [0, 360)')
     assert _has(f, 'error', 'building_frontal_area_fraction', 'negative')
+
+
+def test_slurb_urban_fraction_fill_is_error(tmp_path):
+    # PALM range-checks urban_fraction in every cell (SLU0032)
+    f = _slurb(str(tmp_path / 'u.nc'), urban_fraction=[[0.9, 0.6], [0.5, None]])
+    assert _has(f, 'error', 'urban_fraction', 'fill value in 1 cell', 'SLU0032')
 
 
 def test_slurb_missing_cell_inputs_are_warnings(tmp_path):

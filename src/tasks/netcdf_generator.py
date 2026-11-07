@@ -2540,7 +2540,12 @@ class SlurbDriverGen(StaticDriverGen):
         progress('Inserting SLURB variables into NetCDF')
         for vn in self.cfg.slurb_vars_done:
             var_cfg = self.cfg.slurb_vars[vn]
-            sql_fetch = f'select sg.{vn} from "{schema}"."{self.cfg.tables.grid}" g left join "{schema}"."{self.cfg.tables.grid_slurb}" sg on sg.id = g.id order by g.j, g.i'
+            # PALM-SLUrb range-checks urban_fraction in every cell (0..1, the
+            # fill value is not honoured: SLU0032), so cells outside grid_slurb
+            # get 0 there; the other variables may keep the fill value in
+            # cells below 1 % urban fraction
+            col = f'coalesce(sg.{vn}, 0.0)' if vn == 'urban_fraction' else f'sg.{vn}'
+            sql_fetch = f'select {col} from "{schema}"."{self.cfg.tables.grid}" g left join "{schema}"."{self.cfg.tables.grid_slurb}" sg on sg.id = g.id order by g.j, g.i'
             self.write_type_variable(vn, var_cfg.long_name, var_cfg.vt, self.cfg.fill_values, 0,
                                      sql_query=sql_fetch, units=var_cfg.get('units', ''))
 

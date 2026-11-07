@@ -947,9 +947,16 @@ class InitializeDomainTask(BaseTask):
         # outline grew 1 mm, and an outline on a cell boundary left a 1 mm roof
         # sliver in the neighbouring column, over cells the stair-step grid
         # treats as open ground.
+        # The closing radius is half a grid cell (it was 0.001 m), so notches and
+        # gaps narrower than one cell are filled as well. A canyon narrower than dx
+        # cannot be meshed by the cut-cell surface: filled with terrain it gave
+        # corner conflicts, left open it gave open edges (Legerova: a 0.86 m wide,
+        # 11.5 m long notch). On the 600x800 Legerova domain this adds 31 m2 in
+        # total and the mitred shrink removes 0.4 m2 at acute corners.
+        closing_radius = 0.5 * min(self.cfg.domain.dx, self.cfg.domain.dy)
         sql_finalize_build = f"""
             create table "{self.cfg.domain.case_schema}"."{self.cfg.tables.build_new}" as
-            select st_forcerhr((st_dump(st_buffer(st_union(st_buffer(geom, 0.001, 'join=mitre')), -0.001, 'join=mitre'))).geom) as geom from (
+            select st_forcerhr((st_dump(st_buffer(st_union(st_buffer(geom, {closing_radius}, 'join=mitre')), -{closing_radius}, 'join=mitre'))).geom) as geom from (
                 select geom from "{self.cfg.domain.case_schema}"."{self.cfg.tables.land_build}"
                 union all 
                 select geom from "{self.cfg.domain.case_schema}"."{build_conv}"
@@ -1664,6 +1671,68 @@ class InitializeDomainTask(BaseTask):
         """
         cropped = self.execute(sql_small, (area_limit,)) or []
         progress(f'cropped {len(cropped)} building polygon(s) in clusters smaller than {area_limit} m2')
+
+    def merge_building_slivers(self):
+        """ CCT: merge building polygons that hold no grid cell into the
+        adjacent building they share the most boundary with.
+
+        The landcover preprocessing can leave a thin building sliver between two
+        building polygons (Legerova 600x800: a 0.3 m2, 0.1 m wide strip between
+        a filled passage and its block). Such a polygon gets no buildings_grid
+        cell and no building offset, yet the CCT builds walls and a roof from its
+        outline: walls from the ground and a roof whose vertices sample the
+        heights of both neighbours (8 m to 25 m across 0.1 m). That left
+        singular vertices and an open vertical wall edge in the mesh. Isolated
+        slivers are left to crop_small_buildings; only slivers touching a
+        building that holds grid cells are merged. """
+        if not self.cfg.do_cct:
+            return
+        schema, landcover, grid = self.cfg.domain.case_schema, self.cfg.tables.landcover, self.cfg.tables.grid
+        tr = self.cfg.type_range
+        tol = 0.01
+        pairs = self.execute(f"""
+            with sliver as (
+                select l.lid, l.geom from "{schema}"."{landcover}" l
+                where l.type between {tr.building_min} and {tr.building_max}
+                  and not exists (select 1 from "{schema}"."{grid}" g where g.lid = l.lid)
+            )
+            select distinct on (s.lid) s.lid, b.lid
+            from sliver s
+            join "{schema}"."{landcover}" b
+              on b.lid <> s.lid and b.type between {tr.building_min} and {tr.building_max}
+             and st_dwithin(b.geom, s.geom, %s)
+             and exists (select 1 from "{schema}"."{grid}" g where g.lid = b.lid)
+            order by s.lid, st_area(st_intersection(st_buffer(s.geom, %s), b.geom)) desc, b.lid
+        """, (tol, tol)) or []
+        merged = 0
+        for sliver_lid, target_lid in pairs:
+            # plain union first; a hairline gap between the outlines makes it a
+            # multipolygon, then close it the way preprocess_building_landcover
+            # does (grow 1 mm, union, shrink 1 mm, mitred corners)
+            res = self.execute(f"""
+                with u as (
+                    select st_union(b.geom, s.geom) as geom
+                    from "{schema}"."{landcover}" b, "{schema}"."{landcover}" s
+                    where b.lid = %s and s.lid = %s
+                ), c as (
+                    select case when geometrytype(u.geom) = 'POLYGON' then u.geom
+                                else st_buffer(st_buffer(u.geom, 0.001, 'join=mitre'), -0.001, 'join=mitre') end as geom
+                    from u
+                )
+                update "{schema}"."{landcover}" b set geom = c.geom
+                from c
+                where b.lid = %s and geometrytype(c.geom) = 'POLYGON'
+                returning b.lid
+            """, (target_lid, sliver_lid, target_lid))
+            if not res:
+                warning('building sliver lid {} could not be merged into lid {} (no single polygon); kept',
+                        sliver_lid, target_lid)
+                continue
+            self.execute(f'delete from "{schema}"."{landcover}" where lid = %s', (sliver_lid,))
+            verbose('building sliver lid {} merged into lid {}', sliver_lid, target_lid)
+            merged += 1
+        if merged:
+            progress(f'merged {merged} building sliver(s) without grid cells into the adjacent building')
 
     def _fill_default_building_heights(self):
         """ fill buildings grid where height is missing (null or 0) with values
@@ -2957,11 +3026,19 @@ class InitializeDomainTask(BaseTask):
         progress('generating outer wall and building boundaries')
 
         # 1. create outer walls union (domain-wide building boundaries)
+        # adjacent building polygons are fused by a 1 mm morphological closing
+        # (grow 1 mm, union, shrink 1 mm, mitred corners), as in
+        # preprocess_building_landcover. The former 0.1 um buffer did not close
+        # outlines that meet along nearly but not exactly the same edge (a
+        # filled courtyard and its block): the union kept a zero-width slit
+        # there, its boundary became an 'outer' wall from the ground up inside
+        # the building, and the cut-cell mesh opened ground into it
+        # (Legerova 600x800: 22 such slits of < 1 m2; the 36 courtyards stay).
         sql_outer = f"""
             drop table if exists "{self.cfg.domain.case_schema}"."{self.cfg.tables.walls_outer}";
-            create table "{self.cfg.domain.case_schema}"."{self.cfg.tables.walls_outer}" as 
-            select 
-                st_setsrid(st_boundary(st_union(st_buffer(geom, 0.0000001))), %s) as geom 
+            create table "{self.cfg.domain.case_schema}"."{self.cfg.tables.walls_outer}" as
+            select
+                st_setsrid(st_boundary(st_buffer(st_union(st_buffer(geom, 0.001, 'join=mitre')), -0.001, 'join=mitre')), %s) as geom
             from "{self.cfg.domain.case_schema}"."{self.cfg.tables.landcover}"
             where type between {self.cfg.type_range.building_min} and {self.cfg.type_range.building_max};
 
@@ -3120,6 +3197,11 @@ class InitializeDomainTask(BaseTask):
 
         self.fill_cortyard_polygon()
 
+        # after the courtyard fills (they can leave a building sliver between a
+        # filled courtyard and its block) and before the CCT walls and roofs are
+        # built from the landcover outlines (process_usm)
+        self.merge_building_slivers()
+
         self.check_impervious_grids()
 
 
@@ -3140,11 +3222,47 @@ class InitializeDomainTask(BaseTask):
         self._define_building_offset()
 
         self.vacuum_case_tables(self.cfg.tables.grid, self.cfg.tables.buildings_grid)
+        self._snapshot_terrain_before_fills()
         self._run_all_topo_fills()
+        self._mark_topo_filled_terrain()
 
         self._apply_cct_min_building_height()
 
         self.fill_near_boundary()
+
+    def _snapshot_terrain_before_fills(self):
+        """ CCT: keep the terrain height of every cell before the topography
+        fills (height_prefill). The fills raise small pits and narrow gaps
+        between buildings to the surrounding building height as terrain; the
+        cut-cell surface is built from the building outlines instead, and those
+        raised cells became terrain columns of up to 27 m standing against the
+        slanted walls (Legerova 600x800: 60 cells in a flat domain). The CCT
+        terrain preprocessing reads the snapshot for the cells the fills raised
+        (see _mark_topo_filled_terrain); the stair-step grid itself is rebuilt
+        from the cut surface at the end of cct_driver, which reads nz_prefill
+        for raised cells the cut surface covers with a roof
+        (CctProcessing.align_stairstep_with_cct). """
+        if not self.cfg.do_cct:
+            return
+        schema, grid = self.cfg.domain.case_schema, self.cfg.tables.grid
+        self.execute(f'alter table "{schema}"."{grid}" add column if not exists height_prefill double precision, '
+                     f'add column if not exists height_filled double precision, '
+                     f'add column if not exists nz_prefill integer')
+        self.execute(f'update "{schema}"."{grid}" set height_prefill = height, height_filled = null, nz_prefill = nz')
+
+    def _mark_topo_filled_terrain(self):
+        """ CCT: record the height the topography fills gave each cell they
+        changed (height_filled). The CCT terrain uses height_prefill only while
+        the cell still holds exactly that filled height, so later changes (the
+        boundary fill, the cyclic boundary condition) are kept. """
+        if not self.cfg.do_cct:
+            return
+        schema, grid = self.cfg.domain.case_schema, self.cfg.tables.grid
+        filled =self.execute(f'update "{schema}"."{grid}" set height_filled = height '
+                              f'where height is distinct from height_prefill returning id') or []
+        if filled:
+            progress(f'cct: {len(filled)} grid cell(s) raised by the topography fills; '
+                     f'the cut-cell terrain keeps their height from before the fills')
 
     def _apply_cct_min_building_height(self):
         """ cut-cell topography needs buildings of at least 3 levels """

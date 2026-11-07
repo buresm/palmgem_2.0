@@ -174,6 +174,15 @@ def check_static_consistency(ds):
         if n_bad:
             findings.append(Finding(_ERROR, f'zt: {n_bad} cell(s) without terrain height'))
 
+    # with LSM or USM on, PALM needs all four LSM classifications in the file,
+    # even when one is fill everywhere (netcdf_data_input_check_static, DRV0011).
+    # building_type is needed too with USM on; it is not checked here because a
+    # driver without buildings (e.g. SLURB mode) is valid for runs without USM
+    missing = [vn for vn in ('vegetation_type', 'pavement_type', 'water_type', 'soil_type') if vn not in v]
+    if missing:
+        findings.append(Finding(_ERROR, f'{", ".join(missing)} missing: PALM with the land or urban '
+                                        f'surface model needs all four surface classifications (DRV0011)'))
+
     # every cell carries a surface type; at most one LSM type (more only with
     # surface_fraction, which says how the types share the cell); a building
     # and an LSM type together only under a 3-D building that is hollow at the
@@ -313,7 +322,8 @@ def check_slurb_consistency(ds):
     urban_fraction >= 1 % (SLUrb ignores the others).
 
     Errors: rules PIDS_SLURB states (plan fraction cannot exceed urban
-    fraction, fractions within [0, 1], positive height and aspect ratio,
+    fraction, fractions within [0, 1], urban_fraction set (0 for non-urban)
+    in every cell, positive height and aspect ratio,
     orientation in [0, 360) or fill = isotropic canyon). Warnings: inputs
     missing in a SLUrb cell (PALM falls back to the namelist value there),
     deep canopies > 60 m, values written in cells SLUrb ignores.
@@ -334,6 +344,12 @@ def check_slurb_consistency(ds):
     else:
         uf, uf_def = _values(ds, 'urban_fraction')
         urban = uf_def & (uf >= _SLURB_MIN_URBAN)
+        # slurb_init_arrays range-checks urban_fraction in every cell and does
+        # not honour the fill value (SLU0032): non-urban cells must be 0
+        n_fill = int((~uf_def).sum())
+        if n_fill:
+            err(f'urban_fraction: fill value in {n_fill} cell(s); PALM-SLUrb checks every cell '
+                f'for 0..1 and aborts (SLU0032), non-urban cells must be 0')
 
     # value ranges
     for vn in ('building_plan_area_fraction', 'urban_fraction', 'window_fraction'):
