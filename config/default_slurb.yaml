@@ -40,6 +40,15 @@ slurb_reference_size: 100.0 # m
 # find the buildings on both sides of a street
 canyon_search_radius: 50.0 # m
 canyon_neighbours: 3
+# canyon samples narrower than this are gaps between neighbouring buildings,
+# not streets (a 0.3 m gap next to 20 m buildings gave H/W = 76)
+canyon_min_width: 3.0 # m
+# upper limit of street_canyon_aspect_ratio (H/W); deep real canyons reach ~3-4
+slurb_max_aspect_ratio: 5.0
+# upper limit of building_plan_area_fraction / urban_fraction: SLUrb splits the
+# urban area into buildings and street canyon, and a building share near 1
+# leaves a canyon of ~0 width (NaN in the surface spinup on a 50 m grid)
+slurb_max_plan_urban_ratio: 0.9
 # orientation only where the streets within canyon_search_radius share a
 # direction: coherence R = |length-weighted mean of doubled street
 # bearings| (0 = all directions, 1 = parallel). Below the threshold the

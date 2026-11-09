@@ -305,9 +305,22 @@ def check_building_fractions(ds):
 _SLURB_MIN_URBAN = 0.01
 # SLUrb "does not perform very well with deep urban canopies (>60 m)"
 _SLURB_MAX_HEIGHT = 60.0
-# per-cell urban-form inputs a SLUrb cell needs (else PALM uses the namelist)
-_SLURB_CELL_VARS = ('building_plan_area_fraction', 'building_height',
-                    'street_canyon_aspect_ratio')
+# beyond these the street canyon is degenerate (nearly no street between the
+# buildings, or far deeper than real streets); the driver caps both by default
+_SLURB_MAX_PLAN_URBAN = 0.95
+_SLURB_MAX_ASPECT = 10.0
+# per-cell inputs without a usable PALM default (slurb_init, PALM 25.10):
+# variable -> SLUrb namelist parameter. A variable in the driver overrides the
+# namelist in every SLUrb cell, and a fill value there aborts (SLU0022); left
+# out of the driver, the namelist value is used in every cell, and unset it
+# is undefined memory (SLU0019 with values like 1e-319). Everything else
+# SLUrb reads falls back to its building/pavement type tables.
+_SLURB_CELL_VARS = {'building_plan_area_fraction': 'building_plan_area_fraction',
+                    'building_frontal_area_fraction': 'building_frontal_area_fraction',
+                    'building_height': 'building_height',
+                    'street_canyon_aspect_ratio': 'street_canyon_aspect_ratio',
+                    'z0_urb': 'urban_roughness_length',
+                    'deep_soil_temperature': 'deep_soil_temperature'}
 
 
 def _values(ds, vn):
@@ -319,13 +332,14 @@ def _values(ds, vn):
 def check_slurb_consistency(ds):
     """Cross-variable and range rules for a SLURB driver, from the PALM
     PIDS_SLURB reference and the SLUrb guide. A SLUrb cell is a cell with
-    urban_fraction >= 1 % (SLUrb ignores the others).
+    urban_fraction > 1 % (SLUrb ignores the others).
 
     Errors: rules PIDS_SLURB states (plan fraction cannot exceed urban
     fraction, fractions within [0, 1], urban_fraction set (0 for non-urban)
     in every cell, positive height and aspect ratio,
-    orientation in [0, 360) or fill = isotropic canyon). Warnings: inputs
-    missing in a SLUrb cell (PALM falls back to the namelist value there),
+    orientation in [0, 360) or fill = isotropic canyon, no fill value of a
+    required input in a SLUrb cell). Warnings: required inputs not in the
+    driver (they must come from the SLUrb namelist),
     deep canopies > 60 m, values written in cells SLUrb ignores.
     """
     findings = []
@@ -343,7 +357,7 @@ def check_slurb_consistency(ds):
         urban = None
     else:
         uf, uf_def = _values(ds, 'urban_fraction')
-        urban = uf_def & (uf >= _SLURB_MIN_URBAN)
+        urban = uf_def & (uf > _SLURB_MIN_URBAN)
         # slurb_init_arrays range-checks urban_fraction in every cell and does
         # not honour the fill value (SLU0032): non-urban cells must be 0
         n_fill = int((~uf_def).sum())
@@ -391,25 +405,40 @@ def check_slurb_consistency(ds):
         n_orphan = int((bp_def & ~uf_def).sum())
         if n_orphan:
             err(f'building_plan_area_fraction defined in {n_orphan} cell(s) without urban_fraction')
+        # SLUrb divides the plan fraction by urban_fraction: a building share
+        # near 1 leaves a street canyon of ~0 width
+        n_narrow = int((urban & bp_def & (bp > _SLURB_MAX_PLAN_URBAN * uf)).sum())
+        if n_narrow:
+            warn(f'building_plan_area_fraction above {_SLURB_MAX_PLAN_URBAN:g} x urban_fraction in '
+                 f'{n_narrow} SLUrb cell(s): the street canyon there is ~0 wide '
+                 f'(slurb_max_plan_urban_ratio caps it)')
+    if urban is not None and 'street_canyon_aspect_ratio' in v:
+        hw, hw_def = _values(ds, 'street_canyon_aspect_ratio')
+        n_deep = int((urban & hw_def & (hw > _SLURB_MAX_ASPECT)).sum())
+        if n_deep:
+            warn(f'street_canyon_aspect_ratio above {_SLURB_MAX_ASPECT:g} in {n_deep} SLUrb cell(s), '
+                 f'far beyond real streets (slurb_max_aspect_ratio caps it)')
 
     if urban is not None:
-        # every SLUrb cell needs its urban-form inputs
-        for vn in _SLURB_CELL_VARS:
+        # every SLUrb cell needs these inputs (see _SLURB_CELL_VARS)
+        for vn, nml in _SLURB_CELL_VARS.items():
             if vn not in v:
-                warn(f'{vn} missing: PALM uses the namelist {vn} in all SLUrb cells')
+                hint = ' (at most half the first grid spacing)' if vn == 'z0_urb' else ''
+                warn(f'{vn} not in the driver: set {nml} in the SLUrb namelist{hint}; it has no '
+                     f'default and PALM aborts with SLU0019 when it is unset')
                 continue
             _, d = _values(ds, vn)
             n_missing = int((urban & ~d).sum())
             if n_missing:
-                warn(f'{vn}: undefined in {n_missing} of {int(urban.sum())} SLUrb cell(s); '
-                     f'PALM falls back to the namelist {vn} there')
+                err(f'{vn}: fill value in {n_missing} of {int(urban.sum())} SLUrb cell(s); PALM '
+                    f'aborts there (SLU0022), the namelist {nml} does not replace a value in the driver')
         # values outside SLUrb cells are ignored by the model
-        for vn in _SLURB_CELL_VARS + ('building_frontal_area_fraction', 'street_canyon_orientation'):
+        for vn in tuple(_SLURB_CELL_VARS) + ('street_canyon_orientation',):
             if vn in v:
                 _, d = _values(ds, vn)
                 n_ignored = int((d & ~urban).sum())
                 if n_ignored:
-                    warn(f'{vn}: {n_ignored} cell(s) with urban_fraction < '
+                    warn(f'{vn}: {n_ignored} cell(s) with urban_fraction <= '
                          f'{_SLURB_MIN_URBAN:.0%} carry values SLUrb ignores')
 
     return findings

@@ -839,6 +839,84 @@ class InitializeDomainTask(BaseTask):
             """
             self.execute(sqltext)
 
+        self._move_outline_vertices_off_grid_lines()
+
+    def _move_outline_vertices_off_grid_lines(self):
+        """ CCT: move outline vertices that lie just across a grid line from
+        both ring neighbours back to the neighbours' side.
+
+        Such a vertex makes the outline cross the grid line twice within a few
+        centimetres, i.e. the walls cut one horizontal grid edge twice on every
+        level, which the cut-cell faces cannot describe: the wall face of that
+        column was dropped from the ground to the roof (slant_01: a corner point
+        of the rounded corner 7 mm west of a grid line, a 49-level open seam).
+        A run of consecutive vertices within the tolerance on the same side of
+        the same line is moved together. The vertices move by at most twice the
+        tolerance (5 % of a cell); a polygon the move would make invalid is
+        left as it was. """
+        from shapely import wkb as shp_wkb
+        from shapely.geometry import Polygon
+
+        schema, table = self.cfg.domain.case_schema, self.cfg.tables.build_new
+        d = self.cfg.domain
+        tol = 0.05 * min(d.dx, d.dy)
+        origin = (d.origin_x, d.origin_y)
+        step = (d.dx, d.dy)
+
+        def fix_ring(coords):
+            pts = [list(c) for c in coords[:-1]]
+            n, moved = len(pts), 0
+            if n < 3:
+                return coords, 0
+            for ax in (0, 1):
+                line = [origin[ax] + round((p[ax] - origin[ax]) / step[ax]) * step[ax] for p in pts]
+                off = [p[ax] - g for p, g in zip(pts, line)]
+                near = [0 < abs(o) < tol for o in off]
+                done = [False] * n
+                for s in range(n):
+                    if not near[s] or done[s] or (near[s - 1] and line[s - 1] == line[s]
+                                                  and off[s - 1] * off[s] > 0):
+                        continue    # not the start of a run
+                    run = [s]
+                    while len(run) < n:
+                        t = (run[-1] + 1) % n
+                        if near[t] and line[t] == line[s] and off[t] * off[s] > 0:
+                            run.append(t)
+                        else:
+                            break
+                    for t in run:
+                        done[t] = True
+                    g, side = line[s], 1 if off[s] > 0 else -1
+                    before, after = pts[(run[0] - 1) % n], pts[(run[-1] + 1) % n]
+                    if len(run) < n and (before[ax] - g) * side < 0 and (after[ax] - g) * side < 0:
+                        for t in run:
+                            pts[t][ax] = g - side * tol
+                        moved += len(run)
+            return [tuple(p) for p in pts] + [tuple(pts[0])], moved
+
+        rows = self.execute(f'select ctid::text, st_asbinary(geom) from "{schema}"."{table}" '
+                            f'where geometrytype(geom) = \'POLYGON\'') or []
+        total = 0
+        for tid, geom in rows:
+            poly = shp_wkb.loads(bytes(geom))
+            shell, moved = fix_ring(list(poly.exterior.coords))
+            holes = []
+            for ring in poly.interiors:
+                h, m = fix_ring(list(ring.coords))
+                holes.append(h)
+                moved += m
+            if not moved:
+                continue
+            new = Polygon(shell, holes)
+            if not new.is_valid:
+                warning(f'cct: outline vertices near grid lines left in place (the move would make the polygon invalid)')
+                continue
+            self.execute(f'update "{schema}"."{table}" set geom = st_setsrid(st_geomfromwkb(%s), %s) '
+                         f'where ctid = %s::tid', (new.wkb, self.cfg.srid_palm, tid))
+            total += moved
+        if total:
+            progress(f'cct: {total} building outline vertex(es) moved off a grid line they sat just across')
+
     def preprocess_building_landcover(self):
         """
         joins adjacent buildings using convex hull logic and standardized wall segmentation.

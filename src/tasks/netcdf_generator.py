@@ -2423,6 +2423,18 @@ class SlurbDriverGen(StaticDriverGen):
         if n_fixed:
             debug('slurb: building plan fraction lowered below urban_fraction in {} cell(s)', n_fixed)
 
+        # SLUrb splits the urban area into buildings (plan / urban) and the
+        # street canyon; a building share near 1 leaves a canyon of ~0 width
+        max_ratio = float(self.cfg.get('slurb_max_plan_urban_ratio', 0.9))
+        n_capped_plan = self.fetchone(
+            f'with u as (update "{schema}"."{self.cfg.tables.grid_slurb}" '
+            f'set building_plan_area_fraction = %s * urban_fraction '
+            f'where building_plan_area_fraction > %s * urban_fraction returning 1) select count(*) from u',
+            (max_ratio, max_ratio))
+        if n_capped_plan:
+            verbose('slurb: building plan fraction capped at {} x urban_fraction in {} cell(s)',
+                    max_ratio, n_capped_plan)
+
         n_capped = self.fetchone(
             f'select count(*) from "{schema}"."{self.cfg.tables.grid_slurb}" '
             f'where building_frontal_area_fraction >= 0.99')
@@ -2485,7 +2497,7 @@ class SlurbDriverGen(StaticDriverGen):
                 cross join lateral (
                     select c.val_1, c.val_2, c.width, c.orientation
                     from "{schema}"."{self.cfg.tables.centerline}" c
-                    where st_dwithin(c.geom, gs.geom, %s) and c.width > 0
+                    where st_dwithin(c.geom, gs.geom, %s) and c.width >= %s
                     order by c.geom <-> gs.point
                     limit %s
                 ) c
@@ -2506,6 +2518,7 @@ class SlurbDriverGen(StaticDriverGen):
             from subq s where s.id = gs.id
         """
         self.execute(sql_canyon, (float(self.cfg.canyon_search_radius),
+                                  float(self.cfg.get('canyon_min_width', 0.0) or 0.0) or 1e-9,
                                   int(self.cfg.canyon_neighbours)))
 
         # urban cells without a canyon sample within the radius take the aspect
@@ -2533,6 +2546,17 @@ class SlurbDriverGen(StaticDriverGen):
             """)
             verbose(f'{n_missing} urban cell(s) without a canyon sample within '
                     f'{self.cfg.canyon_search_radius} m took the nearest cell\'s aspect ratio')
+
+        # an aspect ratio far beyond real streets breaks the canyon physics
+        max_hw = float(self.cfg.get('slurb_max_aspect_ratio', 0.0) or 0.0)
+        if max_hw > 0:
+            n_hw = self.fetchone(
+                f'with u as (update "{schema}"."{self.cfg.tables.grid_slurb}" '
+                f'set street_canyon_aspect_ratio = %s '
+                f'where street_canyon_aspect_ratio > %s returning 1) select count(*) from u',
+                (max_hw, max_hw))
+            if n_hw:
+                verbose('slurb: street canyon aspect ratio capped at {} in {} cell(s)', max_hw, n_hw)
 
         self._apply_canyon_coherence()
 

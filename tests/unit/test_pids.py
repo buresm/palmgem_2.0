@@ -258,6 +258,8 @@ _SLURB_OK = dict(
     building_height=[[9.0, 7.0], [6.0, None]],
     street_canyon_aspect_ratio=[[0.3, 0.2], [0.1, None]],
     street_canyon_orientation=[[10.0, None], [179.0, None]],   # None = isotropic
+    z0_urb=[[0.5, 0.4], [0.3, None]],
+    deep_soil_temperature=[[285.0, 285.0], [285.0, None]],
 )
 
 
@@ -274,6 +276,19 @@ def _has(findings, level, *words):
 
 def test_slurb_consistent_driver_is_clean(tmp_path):
     assert _slurb(str(tmp_path / 'ok.nc')) == []
+
+
+def test_slurb_inputs_without_palm_default_left_out_warn(tmp_path):
+    # left out of the driver they must come from the namelist (no PALM default)
+    path = str(tmp_path / 'nml.nc')
+    fields = {k: val for k, val in _SLURB_OK.items() if k not in ('z0_urb', 'deep_soil_temperature')}
+    _make_slurb_nc(path, **fields)
+    from src.utils.pids import check_slurb_consistency
+    with netCDF4.Dataset(path) as ds:
+        f = check_slurb_consistency(ds)
+    assert _has(f, 'warning', 'z0_urb', 'urban_roughness_length', 'SLU0019')
+    assert _has(f, 'warning', 'deep_soil_temperature', 'SLU0019')
+    assert not any(x.level == 'error' for x in f)
 
 
 def test_slurb_plan_exceeding_urban_is_error(tmp_path):
@@ -301,9 +316,18 @@ def test_slurb_urban_fraction_fill_is_error(tmp_path):
     assert _has(f, 'error', 'urban_fraction', 'fill value in 1 cell', 'SLU0032')
 
 
-def test_slurb_missing_cell_inputs_are_warnings(tmp_path):
+def test_slurb_fill_in_slurb_cell_is_error(tmp_path):
+    # a fill value in the driver is read as is and aborts PALM (SLU0022)
     f = _slurb(str(tmp_path / 'm.nc'), street_canyon_aspect_ratio=[[0.3, None], [0.1, None]])
-    assert _has(f, 'warning', 'street_canyon_aspect_ratio', 'undefined in 1 of 3', 'namelist')
+    assert _has(f, 'error', 'street_canyon_aspect_ratio', 'fill value in 1 of 3', 'SLU0022')
+
+
+def test_slurb_degenerate_canyon_warns(tmp_path):
+    f = _slurb(str(tmp_path / 'deg.nc'),
+               building_plan_area_fraction=[[0.89, 0.3], [0.2, None]],   # 0.89 / 0.9 urban
+               street_canyon_aspect_ratio=[[0.3, 76.0], [0.1, None]])
+    assert _has(f, 'warning', 'building_plan_area_fraction', '1 SLUrb cell', 'canyon')
+    assert _has(f, 'warning', 'street_canyon_aspect_ratio', 'above 10', '1 SLUrb cell')
     assert not any(x.level == 'error' for x in f)
 
 
